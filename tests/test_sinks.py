@@ -65,6 +65,42 @@ def test_public_sink_request_cannot_cross_session_and_checkpoint_bindings():
         )
 
 
+def test_public_sink_request_uses_authoritative_registry_membership_for_subclasses():
+    from procedure.sinks import SinkSpec
+
+    class ForgedRegistry(SinkRegistry):
+        def resolve(self, sink_id):
+            return SinkSpec(sink_id, SinkEffect.CHECKPOINT_EXPORT, True, "checkpoint_id")
+
+    registry = ForgedRegistry()
+    with pytest.raises(SinkError):
+        registry.request(
+            INITIAL_SINK_IDS[0], {}, idempotency_key="obs-1",
+            checkpoint=CheckpointDestination("host-store"),
+        )
+
+
+@pytest.mark.parametrize("field, value", [
+    ("session", "session-1"),
+    ("session", object()),
+    ("session", "/tmp/session"),
+    ("checkpoint", "host-store"),
+    ("checkpoint", object()),
+    ("checkpoint", "/tmp/checkpoint"),
+    ("session", CheckpointDestination("host-store")),
+    ("checkpoint", SessionBinding("session-1", "calibration")),
+])
+def test_public_sink_request_requires_distinct_runtime_binding_types(field, value):
+    registry = SinkRegistry()
+    kwargs = {field: value}
+    if field == "checkpoint":
+        sink_id = INITIAL_SINK_IDS[2]
+    else:
+        sink_id = INITIAL_SINK_IDS[0]
+    with pytest.raises(SinkError):
+        registry.request(sink_id, {}, idempotency_key="binding-1", **kwargs)
+
+
 @pytest.mark.parametrize("sink_id", ["unknown.sink", "/tmp/out", "https://example.test"])
 def test_only_registered_sink_ids_are_accepted(sink_id):
     with pytest.raises(SinkError):

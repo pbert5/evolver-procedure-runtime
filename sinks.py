@@ -106,7 +106,14 @@ class SinkRequest:
     ) -> None:
         if not isinstance(_registry, SinkRegistry):
             raise SinkError("sink requests must be created by a trusted registry")
-        spec = _registry.resolve(sink_id)
+        # Resolve through the base implementation so a registry subclass cannot
+        # substitute a fabricated SinkSpec at this public boundary.  Membership
+        # in the trusted registry remains authoritative for request semantics.
+        spec = SinkRegistry.resolve(_registry, sink_id)
+        if session is not None and not isinstance(session, SessionBinding):
+            raise SinkError("session must be a SessionBinding")
+        if checkpoint is not None and not isinstance(checkpoint, CheckpointDestination):
+            raise SinkError("checkpoint must be a CheckpointDestination")
         if spec.effect is SinkEffect.CHECKPOINT_EXPORT:
             if checkpoint is None or session is not None:
                 raise SinkError("checkpoint export requires only a host checkpoint destination")
