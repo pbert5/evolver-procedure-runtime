@@ -57,6 +57,7 @@ class Step:
     prompt: str | None = None
     max_input_length: int | None = None
     poll_ref: TypedRef | None = None
+    condition_ref: TypedRef | None = None
     timeout_polls: int = 1
     poll_interval_s: float = 0.0
     next_step_id: StepRef | None = None
@@ -91,3 +92,4 @@ class ProcedureSession:
     results: list[Any] = field(default_factory=list)
     inputs: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    cleanup_attempted: bool = False
