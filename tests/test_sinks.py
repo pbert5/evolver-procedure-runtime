@@ -57,6 +57,33 @@ def test_explicitly_registered_additional_sink_is_allowed():
     assert registry.resolve(spec.id) is spec
 
 
+@pytest.mark.parametrize("field, value", [
+    ("effect", SinkEffect.CHECKPOINT_EXPORT),
+    ("persistent", False),
+    ("idempotency_key", "checkpoint_id"),
+])
+def test_initial_sink_metadata_cannot_be_replaced(field, value):
+    from dataclasses import replace
+    from procedure.sinks import SinkSpec
+
+    original = SinkRegistry().resolve(INITIAL_SINK_IDS[0])
+    replacement = replace(original, **{field: value})
+    with pytest.raises(SinkError):
+        SinkRegistry({
+            **{sink_id: SinkRegistry().resolve(sink_id) for sink_id in INITIAL_SINK_IDS},
+            original.id: replacement,
+        })
+
+
+def test_initial_sink_metadata_must_be_a_sink_spec():
+    with pytest.raises(SinkError):
+        SinkRegistry({
+            INITIAL_SINK_IDS[0]: object(),
+            INITIAL_SINK_IDS[1]: SinkRegistry().resolve(INITIAL_SINK_IDS[1]),
+            INITIAL_SINK_IDS[2]: SinkRegistry().resolve(INITIAL_SINK_IDS[2]),
+        })
+
+
 @pytest.mark.parametrize("payload", [
     {"path": "/tmp/output"}, {"url": "https://example.test"},
     {"sql": "SELECT * FROM observations"}, {"command": "python -c x"},

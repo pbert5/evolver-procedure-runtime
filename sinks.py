@@ -150,11 +150,16 @@ class SinkRegistry:
     """Allow-list of sink IDs. Registration contains metadata, never executable code."""
 
     def __init__(self, specs: Mapping[str, SinkSpec] | None = None) -> None:
-        values = dict(_initial_registry() if specs is None else specs)
+        initial = _initial_registry()
+        values = dict(initial if specs is None else specs)
         if not set(INITIAL_SINK_IDS).issubset(values):
             raise SinkError("registry is missing an initial trusted sink ID")
-        if any(key != spec.id for key, spec in values.items()):
-            raise SinkError("registry key does not match sink ID")
+        for key, spec in values.items():
+            if not isinstance(spec, SinkSpec) or key != spec.id:
+                raise SinkError("registry key does not match sink ID")
+        for sink_id, expected in initial.items():
+            if values[sink_id] != expected:
+                raise SinkError("initial trusted sink metadata cannot be replaced")
         self._specs = MappingProxyType(values)
 
     def resolve(self, sink_id: str) -> SinkSpec:
