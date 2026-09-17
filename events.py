@@ -21,6 +21,7 @@ MAX_PAYLOAD_DEPTH = 4
 MAX_PAYLOAD_STRING = 256
 MAX_OBSERVER_ERRORS = 16
 MAX_OBSERVER_ERROR_STRING = 256
+MAX_HISTORY_EVENTS = 256
 PROCEDURE_EVENT_TYPE = "procedure-event/1"
 
 
@@ -159,6 +160,7 @@ class ProcedureEventStream:
                  procedure_revision: str | int,
                  controller_generation: int) -> None:
         self._history: list[ProcedureEvent] = []
+        self._next_sequence = 0
         self._current: dict[str, ProcedureEvent] = {}
         self.procedure_id = procedure_id
         self.run_id = run_id
@@ -178,13 +180,15 @@ class ProcedureEventStream:
         if not isinstance(evidence, EvidenceStrength):
             evidence = EvidenceStrength(evidence)
         event = ProcedureEvent(
-            sequence=len(self._history), name=name,
+            sequence=self._next_sequence, name=name,
             procedure_id=self.procedure_id, run_id=self.run_id,
             procedure_revision=self.procedure_revision,
             controller_generation=self.controller_generation,
             evidence=evidence, payload=redact_payload(payload or {}),
         )
+        self._next_sequence += 1
         self._history.append(event)
+        del self._history[:-MAX_HISTORY_EVENTS]
         self._current[name] = event
         for observer in self._observers:
             try:
@@ -194,7 +198,7 @@ class ProcedureEventStream:
                 self.observer_errors.append(str(error)[:MAX_OBSERVER_ERROR_STRING])
                 del self.observer_errors[:-MAX_OBSERVER_ERRORS]
                 if observer.required:
-                    raise RequiredObserverError("required observer failed") from exc
+                    raise RequiredObserverError("required observer failed") from None
         return event
 
     @property
@@ -281,19 +285,34 @@ class ObservedInvoker:
                     self.events.emit("abort.accepted", {"action": getattr(action, "id", action)}, evidence=EvidenceStrength.ACKNOWLEDGED)
                 except RequiredObserverError:
                     pass
-                self._invoker.poll(invocation)
-                try:
-                    self.events.emit("abort.completed", {"action": getattr(action, "id", action)}, evidence=EvidenceStrength.ACKNOWLEDGED)
-                except RequiredObserverError:
-                    pass
-            except Exception:
-                try:
-                    self.events.emit(
-                        "abort.failed", {"action": getattr(action, "id", "<invalid>")},
-                        evidence=EvidenceStrength.ACKNOWLEDGED,
+                result = self._invoker.poll(invocation)
+                if result.done and result.succeeded:
+                    try:
+                        self.events.emit("abort.completed", {"action": getattr(action, "id", action)}, evidence=EvidenceStrength.ACKNOWLEDGED)
+                    except RequiredObserverError:
+                        pass
+                else:
+                    self._emit_abort_failed(
+                        action,
+                        status="failed" if result.done else "incomplete",
+                        error=result.error,
                     )
-                except RequiredObserverError:
-                    pass
+            except Exception as exc:
+                self._emit_abort_failed(action, status="exception", error=f"{type(exc).__name__}: {exc}")
+
+    def _emit_abort_failed(self, action: ActionRef | str, *, status: str, error: Any = None) -> None:
+        try:
+            self.events.emit(
+                "abort.failed",
+                {
+                    "action": getattr(action, "id", action),
+                    "status": status,
+                    "error": error,
+                },
+                evidence=EvidenceStrength.ACKNOWLEDGED,
+            )
+        except RequiredObserverError:
+            pass
 
 
 def _completion_evidence(result: PollResult) -> EvidenceStrength:
