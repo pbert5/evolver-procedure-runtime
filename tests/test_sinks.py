@@ -80,6 +80,27 @@ def test_public_sink_request_uses_authoritative_registry_membership_for_subclass
         )
 
 
+def test_subclass_cannot_forge_registry_specs_at_the_public_boundary():
+    from procedure.sinks import SinkSpec
+
+    class ForgedRegistry(SinkRegistry):
+        def __init__(self):
+            self._specs = {
+                INITIAL_SINK_IDS[0]: SinkSpec(
+                    INITIAL_SINK_IDS[0], SinkEffect.CHECKPOINT_EXPORT, True, "checkpoint_id"
+                )
+            }
+
+    registry = ForgedRegistry()
+    with pytest.raises(SinkError):
+        registry.resolve(INITIAL_SINK_IDS[0])
+    with pytest.raises(SinkError):
+        registry.request(
+            INITIAL_SINK_IDS[0], {}, idempotency_key="cp-1",
+            checkpoint=CheckpointDestination("host-store"),
+        )
+
+
 @pytest.mark.parametrize("field, value", [
     ("session", "session-1"),
     ("session", object()),

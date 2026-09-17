@@ -104,7 +104,7 @@ class SinkRequest:
         *,
         _registry: SinkRegistry | None = None,
     ) -> None:
-        if not isinstance(_registry, SinkRegistry):
+        if type(_registry) is not SinkRegistry:
             raise SinkError("sink requests must be created by a trusted registry")
         # Resolve through the base implementation so a registry subclass cannot
         # substitute a fabricated SinkSpec at this public boundary.  Membership
@@ -192,6 +192,8 @@ class SinkRegistry:
         self._specs = MappingProxyType(values)
 
     def resolve(self, sink_id: str) -> SinkSpec:
+        if type(self) is not SinkRegistry:
+            raise SinkError("sink resolution requires the trusted registry implementation")
         try:
             return self._specs[sink_id]
         except (KeyError, TypeError) as exc:
