@@ -116,7 +116,12 @@ def test_abort_uses_trusted_preflight_and_does_not_leak_invocation_token():
             super().__init__()
             self.preflights = []
         def describe(self, action):
-            return {"id": action.id, "version": action.version, "authorized": action.id in {"stop"}}
+            return {
+                "id": action.id,
+                "version": action.version,
+                "controller_generation": 7,
+                "authorized": action.id in {"stop"},
+            }
         def preflight(self, action, parameters):
             self.preflights.append(action.id)
     invoker, events = PreflightingInvoker(), stream()
@@ -155,7 +160,7 @@ def test_abort_requires_describe_and_never_uses_permissive_noop():
 def test_abort_completion_requires_done_and_success(result, status, error):
     class AbortInvoker(Invoker):
         def describe(self, action):
-            return {"id": action.id, "version": action.version, "authorized": True}
+            return {"id": action.id, "version": action.version, "controller_generation": 7, "authorized": True}
 
         def poll(self, invocation):
             return result
@@ -177,7 +182,7 @@ def test_abort_completion_requires_done_and_success(result, status, error):
 def test_abort_poll_exception_is_failed_and_sanitized():
     class AbortInvoker(Invoker):
         def describe(self, action):
-            return {"id": action.id, "version": action.version, "authorized": True}
+            return {"id": action.id, "version": action.version, "controller_generation": 7, "authorized": True}
 
         def poll(self, invocation):
             raise RuntimeError("token=super-secret")
@@ -196,6 +201,27 @@ def test_abort_poll_exception_is_failed_and_sanitized():
     }
 
 
+@pytest.mark.parametrize(
+    "description",
+    [
+        {"id": "stop", "version": 1, "authorized": True},
+        {"id": "stop", "version": 1, "controller_generation": 8, "authorized": True},
+    ],
+)
+def test_abort_requires_event_stream_controller_generation(description):
+    class AbortInvoker(Invoker):
+        def describe(self, action):
+            return description
+
+    invoker, events = AbortInvoker(), stream()
+    events.add_observer(lambda event: (_ for _ in ()).throw(ValueError("required")), required=True)
+    with pytest.raises(RequiredObserverError):
+        ObservedInvoker(invoker, events, abort_actions=(ActionRef("stop", 1),)).invoke(ActionRef("run"), {})
+
+    assert invoker.calls == []
+    assert events.history[-1].name == "abort.failed"
+
+
 def test_required_observer_error_is_bounded_and_does_not_leak_exception_text():
     events = stream()
     events.add_observer(lambda event: (_ for _ in ()).throw(ValueError("token=super-secret")), required=True)
@@ -203,6 +229,7 @@ def test_required_observer_error_is_bounded_and_does_not_leak_exception_text():
         events.emit("run.started")
     assert "super-secret" not in str(failure.value)
     assert failure.value.__cause__ is None
+    assert failure.value.__context__ is None
     assert all("super-secret" not in error for error in events.observer_errors)
 
 

@@ -191,6 +191,7 @@ class ProcedureEventStream:
         del self._history[:-MAX_HISTORY_EVENTS]
         self._current[name] = event
         for observer in self._observers:
+            required_failure = False
             try:
                 observer.callback(event)
             except Exception as exc:
@@ -198,7 +199,11 @@ class ProcedureEventStream:
                 self.observer_errors.append(str(error)[:MAX_OBSERVER_ERROR_STRING])
                 del self.observer_errors[:-MAX_OBSERVER_ERRORS]
                 if observer.required:
-                    raise RequiredObserverError("required observer failed") from None
+                    required_failure = True
+            if required_failure:
+                # Raise outside the except suite so Python does not attach the
+                # observer exception as an implicit context.
+                raise RequiredObserverError("required observer failed")
         return event
 
     @property
@@ -277,8 +282,9 @@ class ObservedInvoker:
                 if (not isinstance(description, Mapping)
                         or description.get("id") != action.id
                         or description.get("version") != action.version
+                        or description.get("controller_generation") != self.events.controller_generation
                         or description.get("authorized") is not True):
-                    raise ValueError("abort action authorization failed")
+                    raise ValueError("abort action authorization or controller generation failed")
                 self.preflight(action, {})
                 invocation = self._invoker.invoke(action, {})
                 try:
