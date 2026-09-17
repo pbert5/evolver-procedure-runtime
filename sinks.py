@@ -24,12 +24,25 @@ class SinkEffect(str, Enum):
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _FORBIDDEN = re.compile(
-    r"(?:^#!|\b(?:bash|cmd|eval|exec|javascript|powershell|python|shell)\s*(?:[-:]|$)|"
+    r"(?:^#!|\b(?:bash|cmd|eval|exec|javascript|powershell|python|shell)\s*(?:[-:(]|$)|"
+    r"\b(?:subprocess|runpy|shutil)\s*[.]|\b(?:os\.(?:system|popen)|__import__|importlib)\b|"
     r"\b(?:alter|create|delete|drop|insert|pragma|select|truncate|union|update)\b)",
     re.IGNORECASE,
 )
+_IMPORT = re.compile(
+    r"(?:\bfrom\s+(?:[.]|[a-z_]\w*(?:\.[a-z_]\w*)*)\s+import\b|"
+    r"\bimport\s+[a-z_]\w*(?:\.[a-z_]\w*)*)",
+    re.IGNORECASE,
+)
 _SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*\s*:\s*/?/?", re.IGNORECASE)
+_URL = re.compile(r"\b[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 _ABSOLUTE = re.compile(r"^(?:[a-z]:[\\/]|/|~(?:[\\/]|$)|\\\\)", re.IGNORECASE)
+_RELATIVE_PATH = re.compile(r"(?:^|[\s=])\.\.?[\\/]")
+_FORBIDDEN_KEYS = frozenset({
+    "callback", "callable", "cmd", "code", "command", "eval", "exec", "executable",
+    "import", "interpreter", "module", "path", "query", "script", "shell", "sql",
+    "uri", "url", "importlib", "popen", "runpy", "shutil", "subprocess", "system",
+})
 
 INITIAL_SINK_IDS = (
     "edge.calibration_run.observation",
@@ -109,11 +122,13 @@ def _validate_data(value: Any, path: str) -> None:
     if isinstance(value, str):
         if value != value.strip() or any(ord(char) < 32 for char in value):
             raise SinkError(f"malformed data at {path}")
-        if _SCHEME.match(value) or _ABSOLUTE.match(value) or _FORBIDDEN.search(value):
+        if (_SCHEME.match(value) or _URL.search(value) or _ABSOLUTE.match(value)
+                or _RELATIVE_PATH.search(value) or _IMPORT.search(value) or _FORBIDDEN.search(value)):
             raise SinkError(f"unsupported execution mechanism at {path}")
     elif isinstance(value, Mapping):
         for key, nested in value.items():
-            if not isinstance(key, str) or not _IDENTIFIER.fullmatch(key):
+            if (not isinstance(key, str) or not _IDENTIFIER.fullmatch(key)
+                    or any(part in _FORBIDDEN_KEYS for part in re.split(r"[._-]", key.casefold()))):
                 raise SinkError(f"payload key at {path} is not a trusted identifier")
             _validate_data(nested, f"{path}.{key}")
     elif isinstance(value, (list, tuple)):

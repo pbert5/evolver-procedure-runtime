@@ -61,10 +61,22 @@ def test_explicitly_registered_additional_sink_is_allowed():
     {"path": "/tmp/output"}, {"url": "https://example.test"},
     {"sql": "SELECT * FROM observations"}, {"command": "python -c x"},
     {"callback": object()},
+    {"note": "import os"}, {"note": "from pathlib import Path"},
+    {"note": "__import__('os')"}, {"note": "subprocess.run(['tool'])"},
+    {"note": "see https://example.test"}, {"note": "write ../outside"},
 ])
 def test_payload_has_no_execution_surface(payload):
     with pytest.raises(SinkError):
         SinkRegistry().request(INITIAL_SINK_IDS[0], payload, idempotency_key="obs-1")
+
+
+@pytest.mark.parametrize("key", [
+    "callback", "command", "exec", "import", "module", "path", "script", "shell", "sql", "url",
+    "callback_handler", "import_path", "importlib", "shell_command", "subprocess",
+])
+def test_execution_surface_keys_are_denied_even_with_data_values(key):
+    with pytest.raises(SinkError):
+        SinkRegistry().request(INITIAL_SINK_IDS[0], {key: "safe"}, idempotency_key="obs-1")
 
 
 def test_ambiguous_outcome_is_explicit_and_never_retried():

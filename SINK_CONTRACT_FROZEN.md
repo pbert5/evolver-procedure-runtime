@@ -19,7 +19,17 @@ checkpoint-export sink.
 ## Payloads and effects
 
 Every request has a trusted sink ID, data-only mapping payload, and explicit
-idempotency key. Observation requests may carry an ephemeral `SessionBinding`.
+idempotency key. Payload keys use the identifier grammar but additionally deny
+the narrow execution-surface names and identifier segments `callback`,
+`callable`, `cmd`, `code`,
+`command`, `eval`, `exec`, `executable`, `import`, `interpreter`, `module`,
+`path`, `query`, `script`, `shell`, `sql`, `uri`, and `url`. Keys also deny the
+import/process names `importlib`, `popen`, `runpy`, `shutil`,
+`subprocess`, and `system` (including when these terms are identifier
+segments). Payload strings
+deny import forms (`import`, `from ... import`, `__import__`), module loaders,
+shell/process launch forms, SQL keywords, URLs, and absolute or relative path
+forms. Observation requests may carry an ephemeral `SessionBinding`.
 Checkpoint requests carry a host-supplied `CheckpointDestination`; that value
 is an opaque trusted identifier, not a path, URL, SQL statement, or command.
 Session binding, checkpoint destination, and persistent sink identity are
