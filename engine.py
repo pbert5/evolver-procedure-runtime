@@ -211,6 +211,9 @@ class ProcedureEngine:
                 continue
             seen.add(key)
             try:
+                # Cleanup authorization is intentionally fresh: the initial
+                # procedure preflight may be stale after the run fails.
+                _authorize_action(self._invoker, action, {})
                 invocation = self._invoker.invoke(action, {})
                 self._invoker.poll(invocation)
             except Exception:

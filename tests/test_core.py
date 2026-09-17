@@ -51,6 +51,8 @@ class FailingInvoker(FakeInvoker):
         self.polls += 1
         if self.failure == "poll" and invocation.token == "run":
             return PollResult(done=True, succeeded=False, error="action failed")
+        if self.failure == "exception" and invocation.token == "run":
+            raise RuntimeError("poll failed")
         if self.failure == "timeout" and invocation.token == "run":
             return PollResult(done=False)
         return PollResult(done=True, value=invocation.token)
@@ -142,8 +144,8 @@ def test_preflight_requires_injected_trusted_action_description():
         ProcedureEngine(invoker).preflight(session)
 
 
-@pytest.mark.parametrize("failure", ["invoke", "poll", "timeout"])
-def test_abort_actions_are_preflighted_and_run_once_on_failure(failure):
+@pytest.mark.parametrize("failure", ["invoke", "poll", "timeout", "exception"])
+def test_abort_actions_are_freshly_preflighted_on_every_failure_path(failure):
     invoker = FailingInvoker(failure=failure)
     invoker.describe = lambda action: action.id in {"run", "stop"}
     session = ProcedureEngine(invoker).new_session(compile_procedure({
@@ -157,7 +159,44 @@ def test_abort_actions_are_preflighted_and_run_once_on_failure(failure):
     with pytest.raises(ProcedureRunError):
         engine.run(session)
     assert [action.id for action, _ in invoker.invocations] == ["run", "stop"]
-    assert [action.id for action, _ in invoker.preflights].count("stop") == 1
+    assert [action.id for action, _ in invoker.preflights].count("stop") == 2
+    assert invoker.preflights[-1][0].id == "stop"
+
+
+def test_abort_cleanup_fails_closed_when_fresh_trust_is_stale():
+    invoker = FailingInvoker(failure="poll")
+    descriptions = iter([True, True, True, False])
+    invoker.describe = lambda action: next(descriptions)
+    session = ProcedureEngine(invoker).new_session(compile_procedure({
+        "id": "x", "name": "x", "version": 1, "purpose": "test", "parameters": {},
+        "entry_step_id": {"type": "step", "id": "run"}, "default_timeout": 60, "metadata": {},
+        "steps": [{"id": "run", "kind": "action", "action": "action:run"}],
+        "abort_actions": [{"type": "action", "id": "stop"}],
+    }))
+    engine = ProcedureEngine(invoker)
+    engine.preflight(session)
+    with pytest.raises(ProcedureRunError):
+        engine.run(session)
+    assert [action.id for action, _ in invoker.invocations] == ["run"]
+
+
+def test_duplicate_abort_actions_do_not_duplicate_hardware_action():
+    invoker = FailingInvoker(failure="poll")
+    invoker.describe = lambda action: action.id in {"run", "stop"}
+    session = ProcedureEngine(invoker).new_session(compile_procedure({
+        "id": "x", "name": "x", "version": 1, "purpose": "test", "parameters": {},
+        "entry_step_id": {"type": "step", "id": "run"}, "default_timeout": 60, "metadata": {},
+        "steps": [{"id": "run", "kind": "action", "action": "action:run"}],
+        "abort_actions": [
+            {"type": "action", "id": "stop", "version": 1},
+            {"type": "action", "id": "stop", "version": 1},
+        ],
+    }))
+    engine = ProcedureEngine(invoker)
+    engine.preflight(session)
+    with pytest.raises(ProcedureRunError):
+        engine.run(session)
+    assert [action.id for action, _ in invoker.invocations] == ["run", "stop"]
 
 
 def test_v1_input_parameter_ref_and_graph_continuation():
