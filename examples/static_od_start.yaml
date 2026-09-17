@@ -1,0 +1,31 @@
+id: calibration.optical-density.static.start
+name: Static OD calibration start
+version: 1
+purpose: interactive calibration
+parameters:
+  od_led_intensity: {type: integer, minimum: 0, maximum: 255}
+entry_step_id: {type: step, id: collect-led}
+steps:
+  - id: collect-led
+    kind: input
+    parameter: {type: parameter, id: od_led_intensity}
+    prompt: OD LED intensity from 0 through 255
+    max_input_length: 8
+  - id: set-led
+    kind: action
+    action: {type: action, id: start_activity, version: 1}
+    parameters:
+      activity: static_od
+      od_led_intensity: {parameter_ref: od_led_intensity}
+    timeout_polls: 30
+    poll_interval_s: 1
+  - id: complete
+    kind: complete
+abort_actions:
+  - {type: action, id: stop_activity, version: 1}
+  - {type: action, id: stop_actuator, version: 1}
+default_timeout: 600
+metadata:
+  calibration_type: optical_density
+  observation_sink_id: central.calibration_session.observation
+  hardware_semantics: od_led_intensity_8_bit

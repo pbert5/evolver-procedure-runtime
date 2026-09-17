@@ -1,0 +1,32 @@
+id: calibration.temperature.point
+name: Temperature calibration point
+version: 1
+purpose: interactive calibration
+parameters:
+  target_temperature_c: {type: number, unit: degree_Celsius, minimum: 0, maximum: 100}
+  reference_temperature_c: {type: number, unit: degree_Celsius, minimum: -50, maximum: 150}
+entry_step_id: {type: step, id: set-target}
+steps:
+  - id: set-target
+    kind: action
+    action: {type: action, id: set_temperature, version: 1}
+    parameters: {target_temperature_c: {parameter_ref: target_temperature_c}}
+    timeout_polls: 30
+    poll_interval_s: 1
+  - id: capture
+    kind: action
+    action: {type: action, id: capture_measurement, version: 1}
+    parameters:
+      metric: thermistor_raw
+      reference_temperature_c: {parameter_ref: reference_temperature_c}
+    timeout_polls: 30
+    poll_interval_s: 1
+  - id: complete
+    kind: complete
+abort_actions:
+  - {type: action, id: stop_actuator, version: 1}
+default_timeout: 600
+metadata:
+  calibration_type: temperature
+  observation_sink_id: edge.calibration_run.observation
+  hardware_semantics: controller_temperature_units

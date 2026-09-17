@@ -1,0 +1,39 @@
+id: calibration.optical-density.review-reporting
+name: OD calibration review reporting
+version: 1
+purpose: interactive calibration
+parameters:
+  review_decision: {type: enum, values: [accept, reject]}
+entry_step_id: {type: step, id: observe}
+steps:
+  - id: observe
+    kind: action
+    action: {type: action, id: request_observation, version: 1}
+    parameters: {calibration_type: optical_density}
+    timeout_polls: 30
+    poll_interval_s: 1
+  - id: collect-decision
+    kind: input
+    parameter: {type: parameter, id: review_decision}
+    prompt: Accept or reject OD calibration evidence; fitting is unavailable
+    max_input_length: 16
+  - id: report
+    kind: action
+    action: {type: action, id: emit_marker, version: 1}
+    parameters:
+      calibration_type: optical_density
+      review_decision: {parameter_ref: review_decision}
+      fitting_available: false
+      report_status: fitting_unavailable
+    timeout_polls: 30
+    poll_interval_s: 1
+  - id: complete
+    kind: complete
+abort_actions:
+  - {type: action, id: stop_activity, version: 1}
+  - {type: action, id: stop_actuator, version: 1}
+default_timeout: 600
+metadata:
+  calibration_type: optical_density
+  observation_sink_id: central.calibration_session.observation
+  fitting_supported: false

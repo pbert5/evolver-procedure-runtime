@@ -1,0 +1,35 @@
+id: calibration.temperature.start
+name: Temperature calibration start
+version: 1
+purpose: interactive calibration
+parameters:
+  target_temperature_c: {type: number, unit: degree_Celsius, minimum: 0, maximum: 100}
+  settle_timeout_s: {type: integer, unit: second, minimum: 1, maximum: 3600}
+entry_step_id: {type: step, id: collect-target}
+steps:
+  - id: collect-target
+    kind: input
+    parameter: {type: parameter, id: target_temperature_c}
+    prompt: Target temperature in degree Celsius
+    max_input_length: 32
+  - id: set-target
+    kind: action
+    action: {type: action, id: set_temperature, version: 1}
+    parameters: {target_temperature_c: {parameter_ref: target_temperature_c}}
+    timeout_polls: 30
+    poll_interval_s: 1
+  - id: settle
+    kind: action
+    action: {type: action, id: wait, version: 1}
+    parameters: {duration_s: {parameter_ref: settle_timeout_s}}
+    timeout_polls: 1000
+    poll_interval_s: 1
+  - id: complete
+    kind: complete
+abort_actions:
+  - {type: action, id: stop_actuator, version: 1}
+default_timeout: 3600
+metadata:
+  calibration_type: temperature
+  observation_sink_id: central.calibration_session.observation
+  hardware_semantics: controller_temperature_units

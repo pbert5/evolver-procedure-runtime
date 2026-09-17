@@ -1,0 +1,31 @@
+id: calibration.pump-flow.start
+name: Pump-flow calibration start
+version: 1
+purpose: interactive calibration
+parameters:
+  pulse_duration_ms: {type: number, unit: millisecond, minimum: 1, maximum: 10000}
+  pulse_count: {type: integer, minimum: 1, maximum: 1}
+entry_step_id: {type: step, id: collect-pulse}
+steps:
+  - id: collect-pulse
+    kind: input
+    parameter: {type: parameter, id: pulse_duration_ms}
+    prompt: Pump pulse duration in milliseconds
+    max_input_length: 16
+  - id: pulse-once
+    kind: action
+    action: {type: action, id: pulse_pump, version: 1}
+    parameters:
+      duration_ms: {parameter_ref: pulse_duration_ms}
+      count: {parameter_ref: pulse_count}
+    timeout_polls: 30
+    poll_interval_s: 1
+  - id: complete
+    kind: complete
+abort_actions:
+  - {type: action, id: stop_actuator, version: 1}
+default_timeout: 600
+metadata:
+  calibration_type: pump_flow_rate
+  observation_sink_id: central.calibration_session.observation
+  hardware_semantics: bounded_single_pulse
