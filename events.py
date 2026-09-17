@@ -88,12 +88,27 @@ def redact_payload(value: Any, *, _depth: int = 0) -> Any:
 class ProcedureEvent:
     sequence: int
     name: str
+    procedure_id: str
+    run_id: str
+    procedure_revision: str | int
+    controller_generation: int
     evidence: EvidenceStrength = EvidenceStrength.NONE
     payload: Mapping[str, Any] = field(default_factory=dict)
-    procedure_id: str | None = None
-    run_id: str | None = None
-    procedure_revision: str | int | None = None
-    controller_generation: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.sequence, int) or self.sequence < 0:
+            raise ValueError("event sequence must be a non-negative integer")
+        for name, value in (("procedure_id", self.procedure_id), ("run_id", self.run_id)):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} is required")
+        if (isinstance(self.procedure_revision, bool)
+                or not isinstance(self.procedure_revision, (str, int))
+                or not str(self.procedure_revision).strip()):
+            raise ValueError("procedure revision is required")
+        if (isinstance(self.controller_generation, bool)
+                or not isinstance(self.controller_generation, int)
+                or self.controller_generation < 0):
+            raise ValueError("controller generation is required")
 
     def as_dict(self) -> dict[str, Any]:
         # Keep the event fields flat for the existing operator projection while
@@ -115,14 +130,14 @@ class ProcedureEvent:
         return json.dumps(self.as_dict(), sort_keys=True, separators=(",", ":"))
 
     def is_for(self, *, procedure_id: str, run_id: str,
-               procedure_revision: str | int | None = None,
-               controller_generation: int | None = None) -> bool:
+               procedure_revision: str | int,
+               controller_generation: int) -> bool:
         """Return whether this event belongs to the supplied fenced run."""
         return (
             self.procedure_id == procedure_id
             and self.run_id == run_id
-            and (procedure_revision is None or self.procedure_revision == procedure_revision)
-            and (controller_generation is None or self.controller_generation == controller_generation)
+            and self.procedure_revision == procedure_revision
+            and self.controller_generation == controller_generation
         )
 
 
@@ -140,9 +155,9 @@ class ProcedureEventStream:
     """Deterministic event history plus an independent latest-event snapshot."""
 
     def __init__(self, observers: Mapping[Callable[[ProcedureEvent], Any], bool] | None = None,
-                 *, procedure_id: str | None = None, run_id: str | None = None,
-                 procedure_revision: str | int | None = None,
-                 controller_generation: int | None = None) -> None:
+                 *, procedure_id: str, run_id: str,
+                 procedure_revision: str | int,
+                 controller_generation: int) -> None:
         self._history: list[ProcedureEvent] = []
         self._current: dict[str, ProcedureEvent] = {}
         self.procedure_id = procedure_id
@@ -153,6 +168,8 @@ class ProcedureEventStream:
             _Observer(callback, required) for callback, required in (observers or {}).items()
         ]
         self.observer_errors: list[str] = []
+        ProcedureEvent(0, "_fence", procedure_id, run_id, procedure_revision,
+                       controller_generation)
 
     def add_observer(self, callback: Callable[[ProcedureEvent], Any], *, required: bool = False) -> None:
         self._observers.append(_Observer(callback, required))
@@ -161,9 +178,11 @@ class ProcedureEventStream:
         if not isinstance(evidence, EvidenceStrength):
             evidence = EvidenceStrength(evidence)
         event = ProcedureEvent(
-            len(self._history), name, evidence, redact_payload(payload or {}),
-            self.procedure_id, self.run_id, self.procedure_revision,
-            self.controller_generation,
+            sequence=len(self._history), name=name,
+            procedure_id=self.procedure_id, run_id=self.run_id,
+            procedure_revision=self.procedure_revision,
+            controller_generation=self.controller_generation,
+            evidence=evidence, payload=redact_payload(payload or {}),
         )
         self._history.append(event)
         self._current[name] = event
@@ -175,7 +194,7 @@ class ProcedureEventStream:
                 self.observer_errors.append(str(error)[:MAX_OBSERVER_ERROR_STRING])
                 del self.observer_errors[:-MAX_OBSERVER_ERRORS]
                 if observer.required:
-                    raise RequiredObserverError(str(exc)) from exc
+                    raise RequiredObserverError("required observer failed") from exc
         return event
 
     @property
@@ -204,7 +223,7 @@ class ObservedInvoker:
 
     def describe(self, action: ActionRef | str) -> Any:
         describe = getattr(self._invoker, "describe", None)
-        return describe(action) if callable(describe) else True
+        return describe(action) if callable(describe) else None
 
     def invoke(self, action: ActionRef | str, parameters: dict[str, Any]) -> ActionInvocation:
         try:
@@ -249,8 +268,13 @@ class ObservedInvoker:
                     # it must not prevent the trusted abort control path.
                     pass
                 description = self.describe(action)
-                if description is False or description is None:
-                    raise ValueError(f"abort action is not trusted: {getattr(action, 'id', action)}")
+                if not isinstance(action, ActionRef) or action.version is None:
+                    raise ValueError("abort action identity/version is required")
+                if (not isinstance(description, Mapping)
+                        or description.get("id") != action.id
+                        or description.get("version") != action.version
+                        or description.get("authorized") is not True):
+                    raise ValueError("abort action authorization failed")
                 self.preflight(action, {})
                 invocation = self._invoker.invoke(action, {})
                 try:
@@ -263,27 +287,25 @@ class ObservedInvoker:
                 except RequiredObserverError:
                     pass
             except Exception:
-                continue
+                try:
+                    self.events.emit(
+                        "abort.failed", {"action": getattr(action, "id", "<invalid>")},
+                        evidence=EvidenceStrength.ACKNOWLEDGED,
+                    )
+                except RequiredObserverError:
+                    pass
 
 
 def _completion_evidence(result: PollResult) -> EvidenceStrength:
     """Only explicit underlying evidence can establish an observation.
 
     A successful software poll is an acknowledgement, not a physical or
-    scientific observation.  The frozen PollResult interface carries any
-    stronger claim in its metadata, so this gate accepts only the explicit
-    versioned strength marker and never infers it from ``value`` or status.
+    scientific observation. PollResult.value is untrusted Any and the frozen
+    contract has no typed evidence-strength authority, so it cannot elevate
+    this event.
     """
     if not result.succeeded:
         return EvidenceStrength.ACKNOWLEDGED
-    metadata = getattr(result, "metadata", None)
-    if not isinstance(metadata, Mapping):
-        metadata = result.value if isinstance(result.value, Mapping) else {}
-    declared = metadata.get("evidence_strength")
-    if declared == EvidenceStrength.OBSERVED.value:
-        evidence = metadata.get("evidence")
-        if isinstance(evidence, Mapping) and evidence.get("kind") in {"physical", "scientific"}:
-            return EvidenceStrength.OBSERVED
     return EvidenceStrength.ACKNOWLEDGED
 
 
