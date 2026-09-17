@@ -86,7 +86,7 @@ class CheckpointDestination:
         _check_identifier(self.destination_id, "checkpoint destination")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class SinkRequest:
     sink_id: str
     payload: Mapping[str, Any]
@@ -94,11 +94,33 @@ class SinkRequest:
     session: SessionBinding | None = None
     checkpoint: CheckpointDestination | None = None
 
-    def __post_init__(self) -> None:
-        _check_identifier(self.sink_id, "sink ID")
-        if not self.idempotency_key or not _IDENTIFIER.fullmatch(self.idempotency_key):
+    def __init__(
+        self,
+        sink_id: str,
+        payload: Mapping[str, Any],
+        idempotency_key: str,
+        session: SessionBinding | None = None,
+        checkpoint: CheckpointDestination | None = None,
+        *,
+        _registry: SinkRegistry | None = None,
+    ) -> None:
+        if not isinstance(_registry, SinkRegistry):
+            raise SinkError("sink requests must be created by a trusted registry")
+        spec = _registry.resolve(sink_id)
+        if spec.effect is SinkEffect.CHECKPOINT_EXPORT:
+            if checkpoint is None or session is not None:
+                raise SinkError("checkpoint export requires only a host checkpoint destination")
+        elif checkpoint is not None:
+            raise SinkError("checkpoint destination is only valid for checkpoint export")
+        _check_identifier(sink_id, "sink ID")
+        if not idempotency_key or not _IDENTIFIER.fullmatch(idempotency_key):
             raise SinkError("idempotency key must be a trusted identifier")
-        _validate_data(self.payload, "payload")
+        _validate_data(payload, "payload")
+        object.__setattr__(self, "sink_id", sink_id)
+        object.__setattr__(self, "payload", payload)
+        object.__setattr__(self, "idempotency_key", idempotency_key)
+        object.__setattr__(self, "session", session)
+        object.__setattr__(self, "checkpoint", checkpoint)
 
 
 @dataclass(frozen=True)
@@ -177,13 +199,9 @@ class SinkRegistry:
         session: SessionBinding | None = None,
         checkpoint: CheckpointDestination | None = None,
     ) -> SinkRequest:
-        spec = self.resolve(sink_id)
-        if spec.effect is SinkEffect.CHECKPOINT_EXPORT:
-            if checkpoint is None or session is not None:
-                raise SinkError("checkpoint export requires only a host checkpoint destination")
-        elif checkpoint is not None:
-            raise SinkError("checkpoint destination is only valid for checkpoint export")
-        request = SinkRequest(sink_id, dict(payload), idempotency_key, session, checkpoint)
+        request = SinkRequest(
+            sink_id, dict(payload), idempotency_key, session, checkpoint, _registry=self
+        )
         return request
 
 

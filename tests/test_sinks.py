@@ -10,6 +10,7 @@ from procedure.sinks import (
     SinkEffect,
     SinkError,
     SinkRegistry,
+    SinkRequest,
 )
 
 
@@ -41,6 +42,27 @@ def test_checkpoint_requires_host_destination_and_cannot_bind_session():
         checkpoint=CheckpointDestination("host-store"),
     )
     assert request.session is None and request.checkpoint.destination_id == "host-store"
+
+
+@pytest.mark.parametrize("sink_id", ["unknown.sink", INITIAL_SINK_IDS[0]])
+def test_public_sink_request_construction_requires_trusted_registry(sink_id):
+    with pytest.raises(SinkError):
+        SinkRequest(sink_id, {}, idempotency_key="obs-1")
+
+
+def test_public_sink_request_cannot_cross_session_and_checkpoint_bindings():
+    registry = SinkRegistry()
+    with pytest.raises(SinkError):
+        SinkRequest(
+            INITIAL_SINK_IDS[0], {}, idempotency_key="obs-1",
+            checkpoint=CheckpointDestination("host-store"), _registry=registry,
+        )
+    with pytest.raises(SinkError):
+        SinkRequest(
+            INITIAL_SINK_IDS[2], {}, idempotency_key="cp-1",
+            checkpoint=CheckpointDestination("host-store"),
+            session=SessionBinding("session-1", "calibration"), _registry=registry,
+        )
 
 
 @pytest.mark.parametrize("sink_id", ["unknown.sink", "/tmp/out", "https://example.test"])
