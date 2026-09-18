@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
+from uuid import uuid4
 
 class StepKind(str, Enum):
     ACTION = "action"
@@ -83,6 +84,25 @@ class Procedure:
     default_timeout: int = 60
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
+@dataclass(frozen=True)
+class PrimaryOutcome:
+    """The terminal procedure reason, fixed before cleanup begins."""
+    kind: str
+    reason: str
+    step_id: str | None = None
+
+@dataclass(frozen=True)
+class CleanupActionOutcome:
+    action: ActionRef
+    status: str
+    error: str | None = None
+
+@dataclass
+class CleanupOutcome:
+    """Run-owned cleanup result; it never replaces ``PrimaryOutcome``."""
+    status: str = "not_attempted"
+    actions: list[CleanupActionOutcome] = field(default_factory=list)
+
 @dataclass
 class ProcedureSession:
     """Ephemeral execution state; deliberately has no persistence/resume API."""
@@ -92,4 +112,8 @@ class ProcedureSession:
     results: list[Any] = field(default_factory=list)
     inputs: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    run_id: str = field(default_factory=lambda: str(uuid4()))
+    controller_generation: int | None = None
+    primary_outcome: PrimaryOutcome | None = None
+    cleanup_outcome: CleanupOutcome = field(default_factory=CleanupOutcome)
     cleanup_attempted: bool = False

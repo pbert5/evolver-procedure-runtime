@@ -8,7 +8,8 @@ from collections.abc import Mapping
 from typing import Any, Callable
 
 from .invoker import ActionInvoker, InputProvider, PollResult
-from .model import Procedure, ProcedureSession, SessionState, Step, StepKind
+from .model import CleanupActionOutcome, PrimaryOutcome, Procedure, ProcedureSession, SessionState, Step, StepKind
+from .events import RequiredObserverError
 
 
 class ProcedurePreflightError(RuntimeError):
@@ -96,6 +97,18 @@ class ProcedureEngine:
             session.error = str(exc)
             raise ProcedurePreflightError(str(exc)) from exc
         session.state = SessionState.PREFLIGHTED
+        self._bind_run_fence(session)
+
+    def _bind_run_fence(self, session: ProcedureSession) -> None:
+        """Capture the run-owned fence once; cleanup will only match it."""
+        events = getattr(self._invoker, "events", None)
+        if events is not None:
+            session.run_id = events.run_id
+            session.controller_generation = events.controller_generation
+            return
+        generation = getattr(self._invoker, "controller_generation", None)
+        if isinstance(generation, int) and not isinstance(generation, bool) and generation >= 0:
+            session.controller_generation = generation
 
     def _declared_actions(self, procedure: Procedure):
         for step in procedure.steps:
@@ -132,11 +145,15 @@ class ProcedureEngine:
             session.state = SessionState.SUCCEEDED
             return list(session.results)
         except ProcedureRunError as exc:
-            self._fail(session, exc)
+            self._fail(session, exc, kind="timed_out" if "timed out" in str(exc) else "failed")
             raise
+        except RequiredObserverError as exc:
+            error = ProcedureRunError(str(exc))
+            self._fail(session, error, kind="required_observer_failed")
+            raise error from exc
         except Exception as exc:
             error = ProcedureRunError(str(exc))
-            self._fail(session, error)
+            self._fail(session, error, kind="failed")
             raise error from exc
 
     @staticmethod
@@ -198,23 +215,53 @@ class ProcedureEngine:
             raise ProcedureRunError("branch target is missing")
         return target.id
 
-    def _fail(self, session: ProcedureSession, error: ProcedureRunError) -> None:
+    def _fail(self, session: ProcedureSession, error: ProcedureRunError, *, kind: str) -> None:
         session.state = SessionState.FAILED
         session.error = str(error)
+        if session.primary_outcome is None:
+            step_id = session.procedure.steps[session.current_step].id if session.procedure.steps else None
+            session.primary_outcome = PrimaryOutcome(kind=kind, reason=str(error), step_id=step_id)
         if session.cleanup_attempted:
             return
         session.cleanup_attempted = True
+        session.cleanup_outcome.status = "running"
         seen: set[tuple[str, str | int | None]] = set()
         for action in session.procedure.abort_actions:
             key = (action.id, action.version)
             if key in seen:
                 continue
             seen.add(key)
-            try:
-                # Cleanup authorization is intentionally fresh: the initial
-                # procedure preflight may be stale after the run fails.
-                _authorize_action(self._invoker, action, {})
-                invocation = self._invoker.invoke(action, {})
-                self._invoker.poll(invocation)
-            except Exception:
-                continue
+            self._run_cleanup_action(session, action)
+        if not session.cleanup_outcome.actions:
+            session.cleanup_outcome.status = "succeeded"
+        elif all(result.status == "succeeded" for result in session.cleanup_outcome.actions):
+            session.cleanup_outcome.status = "succeeded"
+        else:
+            session.cleanup_outcome.status = "failed"
+
+    def _run_cleanup_action(self, session: ProcedureSession, action: Any) -> None:
+        """Execute exactly one fresh, fenced cleanup action and retain its result."""
+        try:
+            description = getattr(self._invoker, "describe", lambda _: None)(action)
+            if not isinstance(description, Mapping) or description.get("id") != action.id or description.get("version") != action.version:
+                raise ProcedureRunError("cleanup action authorization is invalid")
+            if description.get("authorized") is not True:
+                session.cleanup_outcome.actions.append(CleanupActionOutcome(action, "unauthorized"))
+                return
+            expected = session.controller_generation
+            if expected is None or description.get("controller_generation") != expected:
+                session.cleanup_outcome.actions.append(CleanupActionOutcome(action, "generation_mismatch"))
+                return
+            self._invoker.preflight(action, {})
+            invocation = self._invoker.invoke(action, {})
+            result = self._invoker.poll(invocation)
+            if result.done and result.succeeded:
+                session.cleanup_outcome.actions.append(CleanupActionOutcome(action, "succeeded"))
+            else:
+                session.cleanup_outcome.actions.append(CleanupActionOutcome(
+                    action, "failed" if result.done else "incomplete", result.error,
+                ))
+        except Exception as exc:
+            session.cleanup_outcome.actions.append(CleanupActionOutcome(
+                action, "failed", f"{type(exc).__name__}: {exc}",
+            ))

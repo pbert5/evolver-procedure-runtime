@@ -37,6 +37,7 @@ class FakeInvoker:
 
 
 class FailingInvoker(FakeInvoker):
+    controller_generation = 7
     def __init__(self, *, failure="poll"):
         super().__init__()
         self.failure = failure
@@ -56,6 +57,13 @@ class FailingInvoker(FakeInvoker):
         if self.failure == "timeout" and invocation.token == "run":
             return PollResult(done=False)
         return PollResult(done=True, value=invocation.token)
+
+
+def fenced_description(action):
+    return {
+        "id": action.id, "version": action.version,
+        "authorized": action.id in {"run", "stop"}, "controller_generation": 7,
+    }
 
 
 class FakeInputProvider:
@@ -147,7 +155,7 @@ def test_preflight_requires_injected_trusted_action_description():
 @pytest.mark.parametrize("failure", ["invoke", "poll", "timeout", "exception"])
 def test_abort_actions_are_freshly_preflighted_on_every_failure_path(failure):
     invoker = FailingInvoker(failure=failure)
-    invoker.describe = lambda action: action.id in {"run", "stop"}
+    invoker.describe = fenced_description
     session = ProcedureEngine(invoker).new_session(compile_procedure({
         "id": "x", "name": "x", "version": 1, "purpose": "test", "parameters": {},
         "entry_step_id": {"type": "step", "id": "run"}, "default_timeout": 60, "metadata": {},
@@ -182,7 +190,7 @@ def test_abort_cleanup_fails_closed_when_fresh_trust_is_stale():
 
 def test_duplicate_abort_actions_do_not_duplicate_hardware_action():
     invoker = FailingInvoker(failure="poll")
-    invoker.describe = lambda action: action.id in {"run", "stop"}
+    invoker.describe = fenced_description
     session = ProcedureEngine(invoker).new_session(compile_procedure({
         "id": "x", "name": "x", "version": 1, "purpose": "test", "parameters": {},
         "entry_step_id": {"type": "step", "id": "run"}, "default_timeout": 60, "metadata": {},
@@ -224,7 +232,7 @@ def test_v1_input_parameter_ref_and_graph_continuation():
 
 def test_procedure_deadline_still_runs_abort_cleanup():
     invoker = FailingInvoker(failure="timeout")
-    invoker.describe = lambda action: action.id in {"run", "stop"}
+    invoker.describe = fenced_description
     clock_values = iter([0.0, 0.1, 0.2, 2.0, 2.0])
     engine = ProcedureEngine(invoker, clock=lambda: next(clock_values))
     session = engine.new_session(compile_procedure({

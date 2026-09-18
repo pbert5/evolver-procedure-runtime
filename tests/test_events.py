@@ -96,7 +96,7 @@ def test_optional_observer_failure_does_not_retry_or_duplicate_action():
     assert invoker.calls == ["run"]
 
 
-def test_required_observer_failure_aborts_before_next_action():
+def test_required_observer_failure_escalates_without_starting_a_second_abort_engine():
     invoker, events = Invoker(), stream()
     events.add_observer(lambda event: (_ for _ in ()).throw(ValueError("required")), required=True)
     observed = ObservedInvoker(invoker, events, abort_actions=(ActionRef("stop", 1),))
@@ -107,119 +107,8 @@ def test_required_observer_failure_aborts_before_next_action():
     else:
         raise AssertionError("required observer failure was swallowed")
     assert invoker.calls == []
-    assert events.history[-1].name == "abort.failed"
-
-
-def test_abort_uses_trusted_preflight_and_does_not_leak_invocation_token():
-    class PreflightingInvoker(Invoker):
-        def __init__(self):
-            super().__init__()
-            self.preflights = []
-        def describe(self, action):
-            return {
-                "id": action.id,
-                "version": action.version,
-                "controller_generation": 7,
-                "authorized": action.id in {"stop"},
-            }
-        def preflight(self, action, parameters):
-            self.preflights.append(action.id)
-    invoker, events = PreflightingInvoker(), stream()
-    observed = ObservedInvoker(invoker, events, abort_actions=(ActionRef("stop", 1),))
-    events.add_observer(lambda event: (_ for _ in ()).throw(ValueError("token=super-secret")), required=True)
-    try:
-        observed.invoke(ActionRef("run"), {})
-    except RequiredObserverError:
-        pass
-    assert invoker.preflights == ["stop"]
-    assert invoker.calls == ["stop"]
-    assert [event.name for event in events.history[-3:]] == [
-        "abort.requested", "abort.accepted", "abort.completed",
-    ]
-    assert all("super-secret" not in error for error in events.observer_errors)
-
-
-def test_abort_requires_describe_and_never_uses_permissive_noop():
-    invoker, events = Invoker(), stream()
-    observed = ObservedInvoker(invoker, events, abort_actions=(ActionRef("stop", 1),))
-    events.add_observer(lambda event: (_ for _ in ()).throw(ValueError("required")), required=True)
-    with pytest.raises(RequiredObserverError):
-        observed.invoke(ActionRef("run"), {})
-    assert invoker.calls == []
-    assert events.history[-1].name == "abort.failed"
-
-
-@pytest.mark.parametrize(
-    ("result", "status", "error"),
-    [
-        (PollResult(done=True, succeeded=True), None, None),
-        (PollResult(done=True, succeeded=False, error="status=failed"), "failed", "status=failed"),
-        (PollResult(done=False, succeeded=True, error="token=secret"), "incomplete", "token=<redacted>"),
-    ],
-)
-def test_abort_completion_requires_done_and_success(result, status, error):
-    class AbortInvoker(Invoker):
-        def describe(self, action):
-            return {"id": action.id, "version": action.version, "controller_generation": 7, "authorized": True}
-
-        def poll(self, invocation):
-            return result
-
-    invoker, events = AbortInvoker(), stream()
-    events.add_observer(lambda event: (_ for _ in ()).throw(ValueError("required")), required=True)
-    observed = ObservedInvoker(invoker, events, abort_actions=(ActionRef("stop", 1),))
-    with pytest.raises(RequiredObserverError):
-        observed.invoke(ActionRef("run"), {})
-
-    abort_events = [event for event in events.history if event.name.startswith("abort.")]
-    assert abort_events[-1].name == ("abort.completed" if status is None else "abort.failed")
-    if status is not None:
-        assert abort_events[-1].evidence is EvidenceStrength.ACKNOWLEDGED
-        assert abort_events[-1].payload["status"] == status
-        assert abort_events[-1].payload["error"] == error
-
-
-def test_abort_poll_exception_is_failed_and_sanitized():
-    class AbortInvoker(Invoker):
-        def describe(self, action):
-            return {"id": action.id, "version": action.version, "controller_generation": 7, "authorized": True}
-
-        def poll(self, invocation):
-            raise RuntimeError("token=super-secret")
-
-    invoker, events = AbortInvoker(), stream()
-    events.add_observer(lambda event: (_ for _ in ()).throw(ValueError("required")), required=True)
-    with pytest.raises(RequiredObserverError):
-        ObservedInvoker(invoker, events, abort_actions=(ActionRef("stop", 1),)).invoke(ActionRef("run"), {})
-
-    failure = events.history[-1]
-    assert failure.name == "abort.failed"
-    assert failure.payload == {
-        "action": "stop",
-        "status": "exception",
-        "error": "RuntimeError: token=<redacted>",
-    }
-
-
-@pytest.mark.parametrize(
-    "description",
-    [
-        {"id": "stop", "version": 1, "authorized": True},
-        {"id": "stop", "version": 1, "controller_generation": 8, "authorized": True},
-    ],
-)
-def test_abort_requires_event_stream_controller_generation(description):
-    class AbortInvoker(Invoker):
-        def describe(self, action):
-            return description
-
-    invoker, events = AbortInvoker(), stream()
-    events.add_observer(lambda event: (_ for _ in ()).throw(ValueError("required")), required=True)
-    with pytest.raises(RequiredObserverError):
-        ObservedInvoker(invoker, events, abort_actions=(ActionRef("stop", 1),)).invoke(ActionRef("run"), {})
-
-    assert invoker.calls == []
-    assert events.history[-1].name == "abort.failed"
+    assert events.history[-1].name == "action.requested"
+    assert not any(event.name.startswith("abort.") for event in events.history)
 
 
 def test_required_observer_error_is_bounded_and_does_not_leak_exception_text():

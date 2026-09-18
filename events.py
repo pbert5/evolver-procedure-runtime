@@ -224,8 +224,9 @@ class ObservedInvoker:
     def __init__(self, invoker: ActionInvoker, events: ProcedureEventStream, *, abort_actions: tuple[ActionRef, ...] = ()) -> None:
         self._invoker = invoker
         self.events = events
-        self._abort_actions = abort_actions
-        self._aborted = False
+        # Kept as a compatibility-only argument while cleanup ownership moves
+        # to ProcedureEngine's run-owned coordinator.
+        del abort_actions
 
     def preflight(self, action: ActionRef | str, parameters: dict[str, Any]) -> None:
         self._invoker.preflight(action, parameters)
@@ -238,13 +239,11 @@ class ObservedInvoker:
         try:
             self.events.emit("action.requested", {"action": getattr(action, "id", action), "parameters": parameters}, evidence=EvidenceStrength.INTENT)
         except RequiredObserverError:
-            self._abort_once()
             raise
         invocation = self._invoker.invoke(action, parameters)
         try:
             self.events.emit("action.accepted", {"action": getattr(action, "id", action), "invocation_token": getattr(invocation, "token", "")}, evidence=EvidenceStrength.ACKNOWLEDGED)
         except RequiredObserverError:
-            self._abort_once()
             raise
         return invocation
 
@@ -257,68 +256,8 @@ class ObservedInvoker:
                     evidence=_completion_evidence(result),
                 )
             except RequiredObserverError:
-                self._abort_once()
                 raise
         return result
-
-    def _abort_once(self) -> None:
-        if self._aborted:
-            return
-        self._aborted = True
-        for action in self._abort_actions:
-            try:
-                # Abort actions are still trusted actions.  Route them through
-                # the same describe/preflight/authorization seam as normal
-                # actions; an observer failure must never grant a bypass.
-                try:
-                    self.events.emit("abort.requested", {"action": getattr(action, "id", action)}, evidence=EvidenceStrength.INTENT)
-                except RequiredObserverError:
-                    # The failing observer is already the reason for abort;
-                    # it must not prevent the trusted abort control path.
-                    pass
-                description = self.describe(action)
-                if not isinstance(action, ActionRef) or action.version is None:
-                    raise ValueError("abort action identity/version is required")
-                if (not isinstance(description, Mapping)
-                        or description.get("id") != action.id
-                        or description.get("version") != action.version
-                        or description.get("controller_generation") != self.events.controller_generation
-                        or description.get("authorized") is not True):
-                    raise ValueError("abort action authorization or controller generation failed")
-                self.preflight(action, {})
-                invocation = self._invoker.invoke(action, {})
-                try:
-                    self.events.emit("abort.accepted", {"action": getattr(action, "id", action)}, evidence=EvidenceStrength.ACKNOWLEDGED)
-                except RequiredObserverError:
-                    pass
-                result = self._invoker.poll(invocation)
-                if result.done and result.succeeded:
-                    try:
-                        self.events.emit("abort.completed", {"action": getattr(action, "id", action)}, evidence=EvidenceStrength.ACKNOWLEDGED)
-                    except RequiredObserverError:
-                        pass
-                else:
-                    self._emit_abort_failed(
-                        action,
-                        status="failed" if result.done else "incomplete",
-                        error=result.error,
-                    )
-            except Exception as exc:
-                self._emit_abort_failed(action, status="exception", error=f"{type(exc).__name__}: {exc}")
-
-    def _emit_abort_failed(self, action: ActionRef | str, *, status: str, error: Any = None) -> None:
-        try:
-            self.events.emit(
-                "abort.failed",
-                {
-                    "action": getattr(action, "id", action),
-                    "status": status,
-                    "error": error,
-                },
-                evidence=EvidenceStrength.ACKNOWLEDGED,
-            )
-        except RequiredObserverError:
-            pass
 
 
 def _completion_evidence(result: PollResult) -> EvidenceStrength:
