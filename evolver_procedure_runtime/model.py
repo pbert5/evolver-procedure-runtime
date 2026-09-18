@@ -15,9 +15,15 @@ class StepKind(str, Enum):
 class SessionState(str, Enum):
     CREATED = "created"
     PREFLIGHTED = "preflighted"
+    READY = "ready"
     RUNNING = "running"
+    WAITING_INPUT = "waiting_input"
+    WAITING_ACTION = "waiting_action"
+    WAITING_CONDITION = "waiting_condition"
+    PAUSED = "paused"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    ABORTED = "aborted"
 
 @dataclass(frozen=True)
 class TypedRef:
@@ -103,6 +109,19 @@ class CleanupOutcome:
     status: str = "not_attempted"
     actions: list[CleanupActionOutcome] = field(default_factory=list)
 
+
+@dataclass(frozen=True)
+class AdvanceResult:
+    """Bounded, caller-visible result of one incremental transition."""
+
+    state: SessionState
+    input_parameter: str | None = None
+    input_prompt: str | None = None
+    input_max_length: int | None = None
+    next_poll_at: float | None = None
+    value: Any = None
+    error: str | None = None
+
 @dataclass
 class ProcedureSession:
     """Ephemeral execution state; deliberately has no persistence/resume API."""
@@ -117,3 +136,8 @@ class ProcedureSession:
     primary_outcome: PrimaryOutcome | None = None
     cleanup_outcome: CleanupOutcome = field(default_factory=CleanupOutcome)
     cleanup_attempted: bool = False
+    current_step_id: str | None = None
+    pending_invocation: Any = None
+    pending_poll_count: int = 0
+    next_poll_at: float | None = None
+    deadline: float | None = None

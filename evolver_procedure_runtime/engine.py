@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from typing import Any, Callable
 
 from .invoker import ActionInvoker, InputProvider, PollResult
-from .model import CleanupActionOutcome, PrimaryOutcome, Procedure, ProcedureSession, SessionState, Step, StepKind
+from .model import AdvanceResult, CleanupActionOutcome, PrimaryOutcome, Procedure, ProcedureSession, SessionState, Step, StepKind
 from .events import RequiredObserverError
 
 
@@ -97,7 +97,138 @@ class ProcedureEngine:
             session.error = str(exc)
             raise ProcedurePreflightError(str(exc)) from exc
         session.state = SessionState.PREFLIGHTED
+        session.current_step_id = session.procedure.entry_step_id.id
         self._bind_run_fence(session)
+
+    def provide_parameter(self, session: ProcedureSession, name: str, value: Any) -> None:
+        """Validate and store one input without advancing the session."""
+        if session.state not in {SessionState.PREFLIGHTED, SessionState.READY,
+                                 SessionState.WAITING_INPUT, SessionState.RUNNING}:
+            raise ProcedureRunError("session is not accepting input")
+        if name not in session.procedure.parameters:
+            raise ValueError(f"input parameter is not declared: {name}")
+        spec = session.procedure.parameters[name]
+        expected = spec.get("type") if isinstance(spec, Mapping) else None
+        valid = {
+            "integer": lambda item: type(item) is int,
+            "number": lambda item: type(item) in {int, float},
+            "string": lambda item: isinstance(item, str),
+            "boolean": lambda item: type(item) is bool,
+        }.get(expected, lambda item: True)
+        if not valid(value):
+            raise ValueError(f"input parameter has invalid type: {name}")
+        if isinstance(value, str) and len(value) > self._input_limit(session, name):
+            raise ValueError(f"input exceeds maximum length: {name}")
+        _validate_parameter_value(value, f"input.{name}")
+        session.inputs[name] = value
+
+    @staticmethod
+    def _input_limit(session: ProcedureSession, name: str) -> int:
+        step = next((item for item in session.procedure.steps
+                     if item.kind is StepKind.INPUT and item.input_ref and item.input_ref.id == name), None)
+        return step.max_input_length or 4096 if step else 4096
+
+    def advance(self, session: ProcedureSession) -> AdvanceResult:
+        """Perform at most one external action invocation or poll."""
+        if session.state is SessionState.CREATED:
+            raise ProcedureRunError("preflight is required before advance")
+        if session.state in {SessionState.SUCCEEDED, SessionState.FAILED, SessionState.ABORTED}:
+            return AdvanceResult(session.state, error=session.error)
+        if session.deadline is None:
+            session.deadline = self._clock() + session.procedure.default_timeout
+        if session.current_step_id is None:
+            session.current_step_id = session.procedure.entry_step_id.id
+        session.state = SessionState.RUNNING
+        steps = {step.id: step for step in session.procedure.steps}
+
+        try:
+            if session.pending_invocation is not None:
+                if self._clock() >= session.deadline:
+                    raise ProcedureRunError("procedure timed out")
+                if session.next_poll_at is not None and self._clock() < session.next_poll_at:
+                    session.state = SessionState.WAITING_ACTION
+                    return AdvanceResult(session.state, next_poll_at=session.next_poll_at)
+                step = steps[session.current_step_id]
+                result = self._invoker.poll(session.pending_invocation)
+                session.pending_poll_count += 1
+                if not result.done:
+                    if session.pending_poll_count >= step.timeout_polls:
+                        raise ProcedureRunError(f"step timed out: {step.id}")
+                    session.next_poll_at = self._clock() + step.poll_interval_s
+                    session.state = SessionState.WAITING_ACTION
+                    return AdvanceResult(session.state, next_poll_at=session.next_poll_at)
+                session.pending_invocation = None
+                session.next_poll_at = None
+                session.pending_poll_count = 0
+                if not result.succeeded:
+                    raise ProcedureRunError(result.error or f"step failed: {step.id}")
+                session.results.append(result.value)
+                session.current_step_id = self._next_step_id(session.procedure, step)
+                return self._finish_or_ready(session, steps)
+
+            step = steps[session.current_step_id]
+            session.current_step = session.procedure.steps.index(step)
+            if self._clock() >= session.deadline:
+                raise ProcedureRunError("procedure timed out")
+            if step.kind is StepKind.INPUT:
+                name = step.input_ref.id if step.input_ref else ""
+                if name not in session.procedure.parameters:
+                    raise ProcedureRunError(f"input parameter is not declared: {name}")
+                if name not in session.inputs:
+                    session.state = SessionState.WAITING_INPUT
+                    return AdvanceResult(session.state, input_parameter=name,
+                                         input_prompt=step.prompt,
+                                         input_max_length=step.max_input_length)
+                session.current_step_id = self._next_step_id(session.procedure, step)
+                return self.advance(session)
+            if step.kind is StepKind.ACTION or step.kind is StepKind.POLL:
+                action = step.action_ref or step.poll_ref
+                parameters = _resolve_parameters(dict(step.parameters), session.inputs)
+                _authorize_action(self._invoker, action, parameters)
+                session.pending_invocation = self._invoker.invoke(action, parameters)
+                session.pending_poll_count = 0
+                session.next_poll_at = self._clock()
+                session.state = SessionState.WAITING_ACTION
+                return AdvanceResult(session.state, next_poll_at=session.next_poll_at)
+            if step.kind is StepKind.BRANCH:
+                evaluator = getattr(self._invoker, "evaluate_condition", None)
+                if not callable(evaluator):
+                    evaluator = getattr(self._invoker, "check_condition", None)
+                if not callable(evaluator):
+                    session.state = SessionState.WAITING_CONDITION
+                    return AdvanceResult(session.state)
+                outcome = bool(evaluator(step.condition_ref, dict(session.inputs), tuple(session.results)))
+                target = step.then_step_id if outcome else step.else_step_id
+                if target is None:
+                    raise ProcedureRunError("branch target is missing")
+                session.current_step_id = target.id
+                return self._finish_or_ready(session, steps)
+            if step.kind is StepKind.COMPLETE:
+                session.state = SessionState.SUCCEEDED
+                return AdvanceResult(session.state, value=list(session.results))
+            raise ProcedureRunError(f"unsupported step kind: {step.kind}")
+        except RequiredObserverError as exc:
+            error = ProcedureRunError(str(exc))
+            self._fail(session, error, kind="required_observer_failed")
+            return AdvanceResult(session.state, error=str(error))
+        except Exception as exc:
+            error = exc if isinstance(exc, ProcedureRunError) else ProcedureRunError(str(exc))
+            self._fail(session, error, kind="timed_out" if "timed out" in str(error) else "failed")
+            return AdvanceResult(session.state, error=str(error))
+
+    @staticmethod
+    def _next_step_id(procedure: Procedure, step: Step) -> str | None:
+        return step.next_step_id.id if step.next_step_id else ProcedureEngine._following_id(procedure, step.id)
+
+    def _finish_or_ready(self, session: ProcedureSession, steps: Mapping[str, Step]) -> AdvanceResult:
+        if session.current_step_id is None:
+            session.state = SessionState.SUCCEEDED
+            return AdvanceResult(session.state, value=list(session.results))
+        if steps[session.current_step_id].kind is StepKind.COMPLETE:
+            session.state = SessionState.SUCCEEDED
+            return AdvanceResult(session.state, value=list(session.results))
+        session.state = SessionState.READY
+        return AdvanceResult(session.state)
 
     def _bind_run_fence(self, session: ProcedureSession) -> None:
         """Capture the run-owned fence once; cleanup will only match it."""
@@ -121,40 +252,39 @@ class ProcedureEngine:
     def run(self, session: ProcedureSession) -> list[Any]:
         if session.state is not SessionState.PREFLIGHTED:
             raise ProcedureRunError("preflight is required before run")
-        session.state = SessionState.RUNNING
-        deadline = self._clock() + session.procedure.default_timeout
-        steps = {step.id: step for step in session.procedure.steps}
-        current_id = session.procedure.entry_step_id.id
-        try:
-            while current_id is not None:
-                if self._clock() >= deadline:
-                    raise ProcedureRunError("procedure timed out")
-                step = steps[current_id]
-                session.current_step = session.procedure.steps.index(step)
-                if step.kind is StepKind.INPUT:
-                    self._run_input(session, step)
-                elif step.kind in {StepKind.ACTION, StepKind.POLL}:
-                    self._run_action(session, step, deadline)
-                elif step.kind is StepKind.BRANCH:
-                    current_id = self._branch(session, step)
-                    continue
-                elif step.kind is StepKind.COMPLETE:
-                    session.state = SessionState.SUCCEEDED
-                    return list(session.results)
-                current_id = step.next_step_id.id if step.next_step_id else self._following_id(session.procedure, step.id)
-            session.state = SessionState.SUCCEEDED
-            return list(session.results)
-        except ProcedureRunError as exc:
-            self._fail(session, exc, kind="timed_out" if "timed out" in str(exc) else "failed")
-            raise
-        except RequiredObserverError as exc:
-            error = ProcedureRunError(str(exc))
-            self._fail(session, error, kind="required_observer_failed")
-            raise error from exc
-        except Exception as exc:
-            error = ProcedureRunError(str(exc))
-            self._fail(session, error, kind="failed")
-            raise error from exc
+        while session.state not in {SessionState.SUCCEEDED, SessionState.FAILED, SessionState.ABORTED}:
+            update = self.advance(session)
+            if update.state is SessionState.WAITING_INPUT:
+                if self._input_provider is None:
+                    raise ProcedureRunError("input provider is required")
+                value = self._input_provider.read(update.input_parameter or "", update.input_prompt or "", update.input_max_length or 1)
+                try:
+                    self.provide_parameter(session, update.input_parameter or "", value)
+                except ValueError as exc:
+                    error = ProcedureRunError(str(exc))
+                    self._fail(session, error, kind="failed")
+                    raise error from exc
+            elif update.state is SessionState.WAITING_ACTION and update.next_poll_at is not None:
+                self._sleep(max(0.0, update.next_poll_at - self._clock()))
+            elif update.state is SessionState.WAITING_CONDITION:
+                raise ProcedureRunError("condition evaluator is required")
+            elif update.state is SessionState.FAILED:
+                raise ProcedureRunError(update.error or "procedure failed")
+        if session.state is SessionState.FAILED:
+            raise ProcedureRunError(session.error or "procedure failed")
+        return list(session.results)
+
+    def abort(self, session: ProcedureSession, reason: str = "aborted") -> AdvanceResult:
+        if session.state in {SessionState.SUCCEEDED, SessionState.FAILED, SessionState.ABORTED}:
+            return AdvanceResult(session.state, error=session.error)
+        session.error = reason
+        session.primary_outcome = PrimaryOutcome(kind="aborted", reason=reason,
+                                                 step_id=session.current_step_id)
+        session.state = SessionState.ABORTED
+        session.pending_invocation = None
+        self._fail(session, ProcedureRunError(reason), kind="aborted")
+        session.state = SessionState.ABORTED
+        return AdvanceResult(session.state, error=reason)
 
     @staticmethod
     def _following_id(procedure: Procedure, step_id: str) -> str | None:
