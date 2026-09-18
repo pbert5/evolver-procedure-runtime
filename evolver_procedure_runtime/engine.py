@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import re
 import time
+from uuid import uuid4
 from collections.abc import Mapping
 from typing import Any, Callable
 
 from .invoker import ActionInvoker, InputProvider, PollResult
-from .model import AdvanceResult, CleanupActionOutcome, PrimaryOutcome, Procedure, ProcedureSession, SessionState, Step, StepKind
+from .model import AdvanceResult, Attempt, CleanupActionOutcome, PrimaryOutcome, Procedure, ProcedureSession, SessionState, Step, StepKind
 from .events import RequiredObserverError
 from .sinks import CheckpointDestination, MutationOutcome, SinkRegistry, SinkRequest
 
@@ -19,6 +20,10 @@ class ProcedurePreflightError(RuntimeError):
 
 class ProcedureRunError(RuntimeError):
     pass
+
+
+class CorrectionUnavailable(ProcedureRunError):
+    """The descriptor does not explicitly permit the requested correction."""
 
 
 _ACTION_ID = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -128,6 +133,142 @@ class ProcedureEngine:
             raise ValueError(f"input exceeds maximum length: {name}")
         _validate_parameter_value(value, f"input.{name}")
         session.inputs[name] = value
+        if session.current_step_id is not None:
+            step = next((item for item in session.procedure.steps if item.id == session.current_step_id), None)
+            if step is not None and step.kind is StepKind.INPUT and step.input_ref and step.input_ref.id == name:
+                self._complete_attempt(session, step.id, value, inputs={name: value})
+
+    def rerun_from_here(self, session: ProcedureSession, step_id: str) -> AdvanceResult:
+        """Request a new forward attempt without executing anything yet."""
+        if session.state not in {SessionState.SUCCEEDED, SessionState.FAILED, SessionState.READY}:
+            raise ProcedureRunError("rerun requires a completed session or ready boundary")
+        history = session.attempt_history
+        selected = next((item for item in reversed(history) if item.step_id == step_id and item.status == "completed"), None)
+        if selected is None:
+            raise ProcedureRunError(f"no completed attempt exists for step: {step_id}")
+        ids = [step.id for step in session.procedure.steps]
+        try:
+            start = ids.index(step_id)
+        except ValueError as exc:
+            raise ProcedureRunError(f"unknown step: {step_id}") from exc
+        affected = set(ids[start:])
+        for attempt in history:
+            if attempt.step_id in affected:
+                session._attempt_status[attempt.attempt_id] = "superseded" if attempt.attempt_id == selected.attempt_id else "stale"
+        for step in session.procedure.steps[start:]:
+            if step.kind is StepKind.INPUT and step.input_ref is not None:
+                session.inputs.pop(step.input_ref.id, None)
+        pending = self._new_attempt(session, step_id, status="pending", supersedes=selected.attempt_id)
+        session._pending_attempt_id = pending.attempt_id
+        session.current_step_id = step_id
+        session.current_step = start
+        session.pending_invocation = None
+        session.next_poll_at = None
+        session.deadline = None
+        session.error = None
+        session.state = SessionState.READY
+        self._record_event(session, "procedure.rerun_requested", step_id=step_id, attempt_id=pending.attempt_id,
+                           payload={"supersedes": selected.attempt_id, "invalidated_steps": sorted(affected)})
+        return AdvanceResult(session.state)
+
+    def correct(self, session: ProcedureSession, step_id: str, value: Any) -> AdvanceResult:
+        """Replace an explicitly correctable input while retaining all provenance."""
+        step = next((item for item in session.procedure.steps if item.id == step_id), None)
+        if step is None:
+            raise CorrectionUnavailable(f"unknown step: {step_id}")
+        if not step.correction.replaceable:
+            raise CorrectionUnavailable(f"step is not target-correctable: {step_id}")
+        allowed_kind = {
+            StepKind.INPUT: "input",
+            StepKind.ACTION: "observation",
+            StepKind.CHECKPOINT: "checkpoint",
+        }.get(step.kind)
+        if allowed_kind != step.correction.kind:
+            raise CorrectionUnavailable(f"step correction kind is not supported: {step_id}")
+        if session.state not in {SessionState.SUCCEEDED, SessionState.FAILED, SessionState.READY}:
+            raise CorrectionUnavailable("targeted correction requires a completed session or ready boundary")
+        old = next((item for item in reversed(session.attempt_history)
+                    if item.step_id == step_id and item.status == "completed"), None)
+        if old is None:
+            raise CorrectionUnavailable(f"no completed attempt exists for step: {step_id}")
+        if step.kind is StepKind.INPUT:
+            if step.input_ref is None:
+                raise CorrectionUnavailable(f"step has no correctable input: {step_id}")
+            self._validate_corrected_input(session, step.input_ref.id, value)
+            corrected_inputs = {step.input_ref.id: value}
+        else:
+            try:
+                _validate_parameter_value(value, f"correction.{step_id}")
+            except ProcedurePreflightError as exc:
+                raise CorrectionUnavailable(str(exc)) from exc
+            corrected_inputs = {}
+        session._attempt_status[old.attempt_id] = "superseded"
+        for attempt in session.attempt_history:
+            if attempt.step_id in step.correction.invalidates:
+                session._attempt_status[attempt.attempt_id] = "stale"
+        replacement = self._new_attempt(session, step_id, status="completed", result=value,
+                                        inputs=corrected_inputs, supersedes=old.attempt_id)
+        if step.input_ref is not None:
+            session.inputs[step.input_ref.id] = value
+        self._record_event(session, "procedure.correction_applied", step_id=step_id,
+                           attempt_id=replacement.attempt_id,
+                           payload={"supersedes": old.attempt_id, "invalidated_steps": list(step.correction.invalidates)})
+        return AdvanceResult(session.state, value=value)
+
+    def _validate_corrected_input(self, session: ProcedureSession, name: str, value: Any) -> None:
+        # Reuse the same validation path while keeping correction explicitly non-advancing.
+        if name not in session.procedure.parameters:
+            raise CorrectionUnavailable(f"input parameter is not declared: {name}")
+        spec = session.procedure.parameters[name]
+        expected = spec.get("type") if isinstance(spec, Mapping) else None
+        valid = {"integer": lambda item: type(item) is int,
+                 "number": lambda item: type(item) in {int, float},
+                 "string": lambda item: isinstance(item, str),
+                 "boolean": lambda item: type(item) is bool}.get(expected, lambda item: True)
+        if not valid(value):
+            raise CorrectionUnavailable(f"input parameter has invalid type: {name}")
+        if isinstance(value, str) and len(value) > self._input_limit(session, name):
+            raise CorrectionUnavailable(f"input exceeds maximum length: {name}")
+        try:
+            _validate_parameter_value(value, f"input.{name}")
+        except ProcedurePreflightError as exc:
+            raise CorrectionUnavailable(str(exc)) from exc
+
+    @staticmethod
+    def _new_attempt(session: ProcedureSession, step_id: str, *, status: str,
+                     result: Any = None, inputs: Mapping[str, Any] | None = None,
+                     supersedes: str | None = None) -> Attempt:
+        number = sum(1 for item in session._attempts if item.step_id == step_id) + 1
+        attempt = Attempt(str(uuid4()), step_id, number, status, result=result,
+                          inputs=dict(inputs or {}), supersedes=supersedes)
+        session._attempts.append(attempt)
+        session._attempt_status[attempt.attempt_id] = status
+        return attempt
+
+    @staticmethod
+    def _complete_attempt(session: ProcedureSession, step_id: str, result: Any,
+                          *, inputs: Mapping[str, Any] | None = None) -> Attempt:
+        if session._pending_attempt_id is not None:
+            for index, attempt in enumerate(session._attempts):
+                if attempt.attempt_id == session._pending_attempt_id:
+                    completed = Attempt(attempt.attempt_id, attempt.step_id, attempt.number, "completed",
+                                        result=result, inputs=dict(inputs or attempt.inputs),
+                                        supersedes=attempt.supersedes)
+                    session._attempts[index] = completed
+                    session._attempt_status[attempt.attempt_id] = "completed"
+                    session._pending_attempt_id = None
+                    return completed
+        return ProcedureEngine._new_attempt(session, step_id, status="completed", result=result, inputs=inputs)
+
+    def _record_event(self, session: ProcedureSession, name: str, *, step_id: str | None = None,
+                      attempt_id: str | None = None, payload: Mapping[str, Any] | None = None) -> None:
+        from .model import SessionEvent
+        event = SessionEvent(name=name, run_id=session.run_id, step_id=step_id,
+                             attempt_id=attempt_id, payload=dict(payload or {}))
+        session.events.append(event)
+        stream = getattr(self._invoker, "events", None)
+        if stream is not None:
+            stream.emit(name, {"step_id": step_id, "attempt_id": attempt_id, **dict(payload or {})})
 
     @staticmethod
     def _input_limit(session: ProcedureSession, name: str) -> int:
@@ -169,6 +310,9 @@ class ProcedureEngine:
                 session.pending_poll_count = 0
                 if not result.succeeded:
                     raise ProcedureRunError(result.error or f"step failed: {step.id}")
+                completed = self._complete_attempt(session, step.id, result.value)
+                self._record_event(session, "procedure.attempt_completed", step_id=step.id,
+                                   attempt_id=completed.attempt_id, payload={"status": "completed"})
                 session.results.append(result.value)
                 session.current_step_id = self._next_step_id(session.procedure, step)
                 return self._finish_or_ready(session, steps)
@@ -192,6 +336,13 @@ class ProcedureEngine:
                 action = step.action_ref or step.poll_ref
                 parameters = _resolve_parameters(dict(step.parameters), session.inputs)
                 _authorize_action(self._invoker, action, parameters)
+                pending = next((item for item in session._attempts
+                                if item.attempt_id == session._pending_attempt_id
+                                and item.step_id == step.id), None)
+                if pending is None:
+                    pending = self._new_attempt(session, step.id, status="pending", inputs=parameters,
+                                                supersedes=None)
+                    session._pending_attempt_id = pending.attempt_id
                 session.pending_invocation = self._invoker.invoke(action, parameters)
                 session.pending_poll_count = 0
                 session.next_poll_at = self._clock()
@@ -233,6 +384,9 @@ class ProcedureEngine:
                     session.warnings.append(message)
                     result = self._finish_or_ready(session, steps)
                     return AdvanceResult(result.state, value=result.value, error=message)
+                completed = self._complete_attempt(session, step.id, request.payload)
+                self._record_event(session, "procedure.attempt_completed", step_id=step.id,
+                                   attempt_id=completed.attempt_id, payload={"status": "completed"})
                 if events is not None:
                     events.emit("checkpoint.completed", {"sink_id": request.sink_id, "status": outcome.status})
                 return self._finish_or_ready(session, steps)
