@@ -143,6 +143,16 @@ def test_explicit_observation_correction_replaces_value_without_replaying_action
     assert invoker.invocations == [("observe", {})]
 
 
+def test_correction_must_name_existing_steps():
+    with pytest.raises(ValueError, match="invalidates.*unknown"):
+        compile_procedure({
+            "id": "bad-correction", "name": "Bad", "version": 1, "purpose": "test",
+            "parameters": {}, "entry_step_id": "step:done", "default_timeout": 60, "metadata": {},
+            "steps": [{"id": "done", "kind": "complete",
+                       "correction": {"mode": "replaceable", "invalidates": ["unknown"]}}],
+        })
+
+
 def test_rerun_requires_explicit_continue_and_emits_provenance_events():
     invoker = Invoker()
     engine = ProcedureEngine(invoker)

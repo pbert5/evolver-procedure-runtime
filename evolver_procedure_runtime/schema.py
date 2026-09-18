@@ -109,6 +109,11 @@ def validate_document(document: Any) -> None:
             polls, interval = raw.get("timeout_polls", 1), raw.get("poll_interval_s", 0)
             if type(polls) is not int or not 1 <= polls <= MAX_POLL_COUNT: raise SchemaError(f"step.timeout_polls must be between 1 and {MAX_POLL_COUNT}")
             if isinstance(interval, bool) or not isinstance(interval, (int, float)) or not 0 <= interval <= 60: raise SchemaError("step.poll_interval_s must be between 0 and 60 seconds")
+    for raw in steps:
+        policy = _correction(raw.get("correction"))
+        unknown = set(policy.invalidates) - ids
+        if unknown:
+            raise SchemaError(f"step.correction.invalidates names unknown steps: {sorted(unknown)}")
     if _ref(document["entry_step_id"], "entry_step_id", StepRef).id not in ids: raise SchemaError("entry_step_id does not name a step")
 
 def build_procedure(document: Mapping[str, Any]) -> Procedure:
