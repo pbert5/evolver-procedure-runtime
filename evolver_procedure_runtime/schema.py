@@ -59,7 +59,7 @@ def validate_document(document: Any) -> None:
         if step_id in ids: raise SchemaError(f"duplicate step id: {step_id}")
         ids.add(step_id)
         try: kind = StepKind(raw.get("kind"))
-        except ValueError as exc: raise SchemaError("step.kind must be one of action, input, poll, branch, complete") from exc
+        except ValueError as exc: raise SchemaError("step.kind must be one of action, input, poll, branch, complete, checkpoint") from exc
         allowed = set(_COMMON_STEP_KEYS)
         if kind is StepKind.ACTION:
             allowed |= {"action", "parameters", "timeout_polls", "poll_interval_s"}
@@ -73,6 +73,12 @@ def validate_document(document: Any) -> None:
             allowed |= {"poll", "timeout_polls", "poll_interval_s"}; _ref(raw.get("poll"), "step.poll")
         elif kind is StepKind.BRANCH:
             allowed |= {"condition", "then_step_id", "else_step_id"}; _ref(raw.get("condition"), "step.condition"); _ref(raw.get("then_step_id"), "step.then_step_id", StepRef); _ref(raw.get("else_step_id"), "step.else_step_id", StepRef)
+        elif kind is StepKind.CHECKPOINT:
+            allowed |= {"sink", "payload", "required", "idempotency_key"}
+            _string(raw.get("sink"), "step.sink")
+            payload = _mapping(raw.get("payload"), "step.payload")
+            if type(raw.get("required", True)) is not bool: raise SchemaError("step.required must be a bool")
+            _string(raw.get("idempotency_key", payload.get("checkpoint_id")), "step.idempotency_key")
         unknown_step = set(raw) - allowed
         if unknown_step: raise SchemaError(f"unknown step fields: {sorted(unknown_step)}")
         if "next_step_id" in raw: _ref(raw["next_step_id"], "step.next_step_id", StepRef)
@@ -86,5 +92,5 @@ def build_procedure(document: Mapping[str, Any]) -> Procedure:
     validate_document(document); steps = []
     for raw in document["steps"]:
         kind = StepKind(raw["kind"])
-        steps.append(Step(id=raw["id"], kind=kind, action_ref=_ref(raw["action"], "step.action", ActionRef) if kind is StepKind.ACTION else None, parameters=dict(raw.get("parameters", {})), input_ref=_ref(raw["parameter"], "step.parameter", ParameterRef) if kind is StepKind.INPUT else None, prompt=raw.get("prompt"), max_input_length=raw.get("max_input_length"), poll_ref=_ref(raw["poll"], "step.poll") if kind is StepKind.POLL else None, condition_ref=_ref(raw["condition"], "step.condition") if kind is StepKind.BRANCH else None, timeout_polls=raw.get("timeout_polls", 1), poll_interval_s=float(raw.get("poll_interval_s", 0)), next_step_id=_ref(raw["next_step_id"], "step.next_step_id", StepRef) if "next_step_id" in raw else None, then_step_id=_ref(raw["then_step_id"], "step.then_step_id", StepRef) if kind is StepKind.BRANCH else None, else_step_id=_ref(raw["else_step_id"], "step.else_step_id", StepRef) if kind is StepKind.BRANCH else None))
+        steps.append(Step(id=raw["id"], kind=kind, action_ref=_ref(raw["action"], "step.action", ActionRef) if kind is StepKind.ACTION else None, parameters=dict(raw.get("parameters", {})), input_ref=_ref(raw["parameter"], "step.parameter", ParameterRef) if kind is StepKind.INPUT else None, prompt=raw.get("prompt"), max_input_length=raw.get("max_input_length"), poll_ref=_ref(raw["poll"], "step.poll") if kind is StepKind.POLL else None, condition_ref=_ref(raw["condition"], "step.condition") if kind is StepKind.BRANCH else None, timeout_polls=raw.get("timeout_polls", 1), poll_interval_s=float(raw.get("poll_interval_s", 0)), next_step_id=_ref(raw["next_step_id"], "step.next_step_id", StepRef) if "next_step_id" in raw else None, then_step_id=_ref(raw["then_step_id"], "step.then_step_id", StepRef) if kind is StepKind.BRANCH else None, else_step_id=_ref(raw["else_step_id"], "step.else_step_id", StepRef) if kind is StepKind.BRANCH else None, sink_id=raw.get("sink") if kind is StepKind.CHECKPOINT else None, sink_payload=dict(raw.get("payload", {})) if kind is StepKind.CHECKPOINT else {}, sink_required=raw.get("required", True) if kind is StepKind.CHECKPOINT else True, sink_idempotency_key=raw.get("idempotency_key", raw.get("payload", {}).get("checkpoint_id")) if kind is StepKind.CHECKPOINT else None))
     return Procedure(id=document["id"], name=document["name"], version=document["version"], purpose=document["purpose"], parameters=dict(document["parameters"]), entry_step_id=_ref(document["entry_step_id"], "entry_step_id", StepRef), steps=tuple(steps), abort_actions=tuple(_ref(ref, "abort_actions", ActionRef) for ref in document.get("abort_actions", [])), default_timeout=document["default_timeout"], metadata=dict(document["metadata"]))
