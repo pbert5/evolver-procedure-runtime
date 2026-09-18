@@ -247,6 +247,10 @@ class WorkflowSession:
     def continue_stage(self) -> WorkflowAdvanceResult:
         """Explicitly select the next stage; this never invokes a procedure action."""
         self._require_preflight()
+        if self.active_stage_id and self.active_instance_id:
+            active = self._instance(self.active_stage_id, self.active_instance_id)
+            if not active.completed:
+                raise WorkflowError("active stage must complete before continuation")
         if self.active_stage_id is None:
             self._select_first_unfinished()
             return WorkflowAdvanceResult(self.state, self.active_stage_id, self.active_instance_id)

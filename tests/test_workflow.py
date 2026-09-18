@@ -84,6 +84,8 @@ def test_once_workflow_requires_explicit_continue_after_child_completion():
     session.preflight({"initial": 4})
     assert session.state is WorkflowState.READY
     assert invoker.invocations == []
+    with pytest.raises(ValueError, match="must complete"):
+        session.continue_stage()
     assert session.advance().state is WorkflowState.WAITING_ACTION
     assert session.advance().state is WorkflowState.STAGE_COMPLETE
     assert len(invoker.invocations) == 1
