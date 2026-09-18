@@ -207,7 +207,7 @@ class WorkflowSession:
         self.parameters = self._validate_parameters(supplied)
         for stage in self.definition.stages:
             procedure = self._procedure(stage)
-            if stage.cardinality is Cardinality.ONCE:
+            if stage.cardinality is Cardinality.ONCE and not self._has_output_binding(stage):
                 self._create_instance(stage, {}, procedure)
         self.state = WorkflowState.PREFLIGHTED
         self._select_first_unfinished()
@@ -253,6 +253,11 @@ class WorkflowSession:
         index = next(i for i, stage in enumerate(self.definition.stages) if stage.id == self.active_stage_id)
         for stage in self.definition.stages[index + 1:]:
             instances = self.instances[stage.id]
+            if not instances and stage.cardinality is Cardinality.ONCE:
+                instance = self._create_instance(stage, {}, self._procedure(stage))
+                self.active_stage_id, self.active_instance_id = stage.id, instance.id
+                self.state = WorkflowState.READY
+                return WorkflowAdvanceResult(self.state, stage.id, instance.id)
             if not instances and stage.cardinality is Cardinality.REPEATABLE:
                 self.active_stage_id, self.active_instance_id = stage.id, None
                 self.state = WorkflowState.READY
@@ -307,6 +312,22 @@ class WorkflowSession:
                 if source not in instance_parameters:
                     raise WorkflowPreflightError(f"instance parameter is unset: {source}")
                 result[target] = instance_parameters[source]
+            elif set(binding) == {"output_ref"}:
+                reference = binding["output_ref"]
+                if not isinstance(reference, Mapping) or set(reference) - {"stage", "instance", "result_index"} or "stage" not in reference or "result_index" not in reference:
+                    raise WorkflowPreflightError(f"malformed output binding for {target}")
+                source_instances = self.instances.get(reference["stage"], [])
+                if reference.get("instance", "last") == "last":
+                    source_instance = next((item for item in reversed(source_instances) if item.completed), None)
+                else:
+                    try:
+                        source_instance = source_instances[int(reference["instance"])]
+                    except (ValueError, TypeError, IndexError):
+                        source_instance = None
+                index = reference["result_index"]
+                if source_instance is None or not source_instance.completed or not isinstance(index, int) or index < 0 or index >= len(source_instance.procedure_session.results):
+                    raise WorkflowPreflightError(f"output reference is not available for {target}")
+                result[target] = source_instance.procedure_session.results[index]
             else:
                 raise WorkflowPreflightError(f"unsupported binding for {target}")
         unknown = set(result) - set(procedure.parameters)
@@ -364,12 +385,21 @@ class WorkflowSession:
                     self.active_stage_id, self.active_instance_id = stage.id, instance.id
                     self.state = WorkflowState.READY
                     return
+            if stage.cardinality is Cardinality.ONCE:
+                instance = self._create_instance(stage, {}, self._procedure(stage))
+                self.active_stage_id, self.active_instance_id = stage.id, instance.id
+                self.state = WorkflowState.READY
+                return
         self.active_stage_id = self.active_instance_id = None
         self.state = WorkflowState.SUCCEEDED
 
     def _require_preflight(self) -> None:
         if self.state is WorkflowState.CREATED:
             raise WorkflowPreflightError("workflow preflight is required")
+
+    @staticmethod
+    def _has_output_binding(stage: WorkflowStage) -> bool:
+        return any(set(binding) == {"output_ref"} for binding in stage.bindings.values())
 
     @staticmethod
     def _project(state: SessionState) -> WorkflowState:
