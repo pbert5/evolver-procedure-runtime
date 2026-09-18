@@ -47,7 +47,7 @@ def definition(cardinality="once"):
     bindings = {"value": {"instance_parameter": "value"}} if cardinality == "repeatable" else {"value": {"workflow_parameter": "initial"}}
     return WorkflowDefinition.from_mapping({
         "id": "test.workflow", "name": "Test workflow", "version": 1, "category": "test",
-        "description": "workflow composition", "parameters": {"initial": {"type": "integer"}},
+        "description": "workflow composition", "parameters": {"initial": {"type": "integer", "minimum": 0, "maximum": 10}},
         "requirements": {"capabilities": ["run"]}, "stages": [
             {"id": "setup", "procedure": {"id": "p", "version": 1}, "cardinality": cardinality,
              "bindings": bindings},
@@ -68,6 +68,10 @@ def test_definition_rejects_duplicate_stage_ids_and_bad_cardinality():
 def test_preflight_validates_parameters_and_unknown_procedure_without_action():
     invoker = Invoker()
     session = WorkflowSession(definition(), ProcedureEngine(invoker), {("p", 1): procedure()})
+    with pytest.raises(ValueError, match="above maximum"):
+        session.provide_parameter("initial", 11)
+    with pytest.raises(WorkflowPreflightError, match="required workflow parameters"):
+        WorkflowSession(definition(), ProcedureEngine(invoker), {("p", 1): procedure()}).preflight()
     with pytest.raises(WorkflowPreflightError, match="unknown workflow parameters"):
         session.preflight({"nope": 1})
     assert invoker.invocations == []
@@ -91,6 +95,11 @@ def test_once_workflow_requires_explicit_continue_after_child_completion():
     assert len(invoker.invocations) == 1
     assert session.state is WorkflowState.STAGE_COMPLETE
 
+    aborted = WorkflowSession(definition(), ProcedureEngine(Invoker()), {("p", 1): procedure()})
+    aborted.preflight({"initial": 4})
+    assert aborted.abort("operator cancelled").state is WorkflowState.ABORTED
+    assert aborted.attention is False
+
 
 def test_repeatable_stage_creates_independent_instances_and_library_is_deterministic(tmp_path: Path):
     invoker = Invoker()
@@ -101,6 +110,12 @@ def test_repeatable_stage_creates_independent_instances_and_library_is_determini
     assert first != second
     assert len(session.instances["setup"]) == 2
     assert session.instances["setup"][0].procedure_session is not session.instances["setup"][1].procedure_session
+    once = WorkflowSession(definition(), ProcedureEngine(invoker), {("p", 1): procedure()})
+    once.preflight({"initial": 2})
+    with pytest.raises(ValueError, match="not repeatable"):
+        once.add_instance("setup", {})
+    with pytest.raises(WorkflowPreflightError, match="unknown stage instance"):
+        session.add_instance("setup", {"not_a_binding": 1})
 
     path = tmp_path / "x.yaml"
     path.write_text("""id: z.workflow\nname: Zed\nversion: 1\ncategory: calibration\ndescription: z\nparameters: {}\nrequirements: {}\nstages:\n  - id: one\n    procedure: {id: p, version: 1}\n    cardinality: once\n""")
