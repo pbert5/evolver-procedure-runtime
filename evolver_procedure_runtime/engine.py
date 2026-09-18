@@ -256,7 +256,9 @@ class ProcedureEngine:
             update = self.advance(session)
             if update.state is SessionState.WAITING_INPUT:
                 if self._input_provider is None:
-                    raise ProcedureRunError("input provider is required")
+                    error = ProcedureRunError("input provider is required")
+                    self._fail(session, error, kind="failed")
+                    raise error
                 value = self._input_provider.read(update.input_parameter or "", update.input_prompt or "", update.input_max_length or 1)
                 try:
                     self.provide_parameter(session, update.input_parameter or "", value)
@@ -267,7 +269,9 @@ class ProcedureEngine:
             elif update.state is SessionState.WAITING_ACTION and update.next_poll_at is not None:
                 self._sleep(max(0.0, update.next_poll_at - self._clock()))
             elif update.state is SessionState.WAITING_CONDITION:
-                raise ProcedureRunError("condition evaluator is required")
+                error = ProcedureRunError("condition evaluator is required")
+                self._fail(session, error, kind="failed")
+                raise error
             elif update.state is SessionState.FAILED:
                 raise ProcedureRunError(update.error or "procedure failed")
         if session.state is SessionState.FAILED:

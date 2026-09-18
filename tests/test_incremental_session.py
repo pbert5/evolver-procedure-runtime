@@ -148,7 +148,7 @@ def test_abort_from_input_wait_runs_cleanup_once_and_is_terminal():
             "name": "Abortable",
             "version": 1,
             "purpose": "test",
-            "parameters": {},
+            "parameters": {"missing": {"type": "string"}},
             "entry_step_id": "step:wait",
             "default_timeout": 60,
             "metadata": {},
