@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Session-local interactive procedure runtime for eVOLVER workflows"
 readme = "README.md"
 requires-python = ">=3.10"
+dependencies = ["PyYAML>=6"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-xdist>=3.8", "pytest-cov>=6"]
