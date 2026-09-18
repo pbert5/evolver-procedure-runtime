@@ -1,6 +1,6 @@
 """Immutable, declarative procedure contract and ephemeral session values."""
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Mapping
 from uuid import uuid4
@@ -12,6 +12,11 @@ class StepKind(str, Enum):
     BRANCH = "branch"
     COMPLETE = "complete"
     CHECKPOINT = "checkpoint"
+
+
+class CorrectionMode(str, Enum):
+    NONE = "none"
+    REPLACEABLE = "replaceable"
 
 class SessionState(str, Enum):
     CREATED = "created"
@@ -55,6 +60,17 @@ class ActionResult:
     def succeeded(self) -> bool:
         return self.status in {"succeeded", "success", "ok"}
 
+
+@dataclass(frozen=True)
+class CorrectionPolicy:
+    mode: CorrectionMode = CorrectionMode.NONE
+    kind: str = "input"
+    invalidates: tuple[str, ...] = ()
+
+    @property
+    def replaceable(self) -> bool:
+        return self.mode is CorrectionMode.REPLACEABLE
+
 @dataclass(frozen=True)
 class Step:
     id: str
@@ -75,6 +91,7 @@ class Step:
     sink_payload: Mapping[str, Any] = field(default_factory=dict)
     sink_required: bool = True
     sink_idempotency_key: str | None = None
+    correction: CorrectionPolicy = field(default_factory=CorrectionPolicy)
 
     @property
     def action(self) -> str:
@@ -127,6 +144,29 @@ class AdvanceResult:
     value: Any = None
     error: str | None = None
 
+
+@dataclass(frozen=True)
+class Attempt:
+    """An immutable execution occurrence; session projections add lifecycle status."""
+
+    attempt_id: str
+    step_id: str
+    number: int
+    status: str
+    result: Any = None
+    evidence: Mapping[str, Any] = field(default_factory=dict)
+    inputs: Mapping[str, Any] = field(default_factory=dict)
+    supersedes: str | None = None
+
+
+@dataclass(frozen=True)
+class SessionEvent:
+    name: str
+    run_id: str
+    step_id: str | None = None
+    attempt_id: str | None = None
+    payload: Mapping[str, Any] = field(default_factory=dict)
+
 @dataclass
 class ProcedureSession:
     """Ephemeral execution state; deliberately has no persistence/resume API."""
@@ -147,3 +187,15 @@ class ProcedureSession:
     pending_poll_count: int = 0
     next_poll_at: float | None = None
     deadline: float | None = None
+    _attempts: list[Attempt] = field(default_factory=list, repr=False)
+    _attempt_status: dict[str, str] = field(default_factory=dict, repr=False)
+    _pending_attempt_id: str | None = field(default=None, repr=False)
+    events: list[SessionEvent] = field(default_factory=list)
+
+    @property
+    def attempt_history(self) -> tuple[Attempt, ...]:
+        """Return immutable attempt snapshots, including visible invalidation state."""
+        return tuple(
+            replace(attempt, status=self._attempt_status.get(attempt.attempt_id, attempt.status))
+            for attempt in self._attempts
+        )
