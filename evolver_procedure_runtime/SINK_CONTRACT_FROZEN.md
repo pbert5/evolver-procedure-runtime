@@ -2,7 +2,7 @@
 
 This is the local durable freeze for issue #30 because the GitHub mutation is
 unavailable. The contract is intentionally declarative: hosts route requests
-to trusted implementations; `procedure.sinks` performs no I/O and accepts no
+to trusted implementations; `evolver_procedure_runtime.sinks` performs no I/O and accepts no
 executable extension point.
 
 ## Registered identifiers
