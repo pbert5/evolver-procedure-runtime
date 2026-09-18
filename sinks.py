@@ -64,7 +64,11 @@ class SinkSpec:
         if type(self.persistent) is not bool:
             raise SinkError("persistent must be a bool")
         _check_identifier(self.id, "sink ID")
-        if not self.idempotency_key or not _IDENTIFIER.fullmatch(self.idempotency_key):
+        if (
+            not isinstance(self.idempotency_key, str)
+            or not self.idempotency_key
+            or not _IDENTIFIER.fullmatch(self.idempotency_key)
+        ):
             raise SinkError("idempotency_key must be a trusted identifier")
 
 

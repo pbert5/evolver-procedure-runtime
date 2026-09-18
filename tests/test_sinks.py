@@ -202,6 +202,14 @@ def test_sink_spec_rejects_invalid_metadata_types(field, value):
         )
 
 
+@pytest.mark.parametrize("idempotency_key", [1, object()])
+def test_sink_spec_rejects_non_string_idempotency_keys(idempotency_key):
+    from procedure.sinks import SinkSpec
+
+    with pytest.raises(SinkError):
+        SinkSpec("lab.calibration.observation", SinkEffect.OBSERVATION, True, idempotency_key)
+
+
 @pytest.mark.parametrize("payload", [
     {"path": "/tmp/output"}, {"url": "https://example.test"},
     {"sql": "SELECT * FROM observations"}, {"command": "python -c x"},
