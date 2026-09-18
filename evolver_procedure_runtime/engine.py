@@ -10,6 +10,7 @@ from typing import Any, Callable
 from .invoker import ActionInvoker, InputProvider, PollResult
 from .model import AdvanceResult, CleanupActionOutcome, PrimaryOutcome, Procedure, ProcedureSession, SessionState, Step, StepKind
 from .events import RequiredObserverError
+from .sinks import CheckpointDestination, MutationOutcome, SinkRegistry, SinkRequest
 
 
 class ProcedurePreflightError(RuntimeError):
@@ -77,11 +78,17 @@ def _resolve_parameters(value: Any, inputs: Mapping[str, Any], path: str = "para
 class ProcedureEngine:
     def __init__(self, invoker: ActionInvoker, *, input_provider: InputProvider | None = None,
                  sleep: Callable[[float], None] = time.sleep,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 sink_registry: SinkRegistry | None = None,
+                 checkpoint_destination: CheckpointDestination | None = None,
+                 checkpoint_executor: Callable[[SinkRequest], MutationOutcome] | None = None) -> None:
         self._invoker = invoker
         self._input_provider = input_provider
         self._sleep = sleep
         self._clock = clock
+        self._sink_registry = sink_registry
+        self._checkpoint_destination = checkpoint_destination
+        self._checkpoint_executor = checkpoint_executor
 
     def new_session(self, procedure: Procedure) -> ProcedureSession:
         return ProcedureSession(procedure=procedure)
@@ -202,6 +209,32 @@ class ProcedureEngine:
                 if target is None:
                     raise ProcedureRunError("branch target is missing")
                 session.current_step_id = target.id
+                return self._finish_or_ready(session, steps)
+            if step.kind is StepKind.CHECKPOINT:
+                if self._sink_registry is None or self._checkpoint_destination is None or self._checkpoint_executor is None:
+                    raise ProcedureRunError("checkpoint sink is not configured")
+                payload = _resolve_parameters(dict(step.sink_payload), session.inputs)
+                request = self._sink_registry.request(
+                    step.sink_id or "", payload,
+                    idempotency_key=step.sink_idempotency_key or "checkpoint",
+                    checkpoint=self._checkpoint_destination,
+                )
+                events = getattr(self._invoker, "events", None)
+                if events is not None:
+                    events.emit("checkpoint.requested", {"sink_id": request.sink_id})
+                outcome = self._checkpoint_executor(request)
+                if not isinstance(outcome, MutationOutcome):
+                    raise ProcedureRunError("checkpoint sink returned an invalid outcome")
+                session.current_step_id = self._next_step_id(session.procedure, step)
+                if outcome.status != "accepted":
+                    message = outcome.detail or f"checkpoint sink {outcome.status}"
+                    if step.sink_required:
+                        raise ProcedureRunError(message)
+                    session.warnings.append(message)
+                    result = self._finish_or_ready(session, steps)
+                    return AdvanceResult(result.state, value=result.value, error=message)
+                if events is not None:
+                    events.emit("checkpoint.completed", {"sink_id": request.sink_id, "status": outcome.status})
                 return self._finish_or_ready(session, steps)
             if step.kind is StepKind.COMPLETE:
                 session.state = SessionState.SUCCEEDED

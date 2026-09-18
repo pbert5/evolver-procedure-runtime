@@ -4,6 +4,9 @@ import pytest
 
 from evolver_procedure_runtime import (
     ActionInvocation,
+    CheckpointDestination,
+    MutationOutcome,
+    SinkRegistry,
     PollResult,
     ProcedureEngine,
     SessionState,
@@ -181,3 +184,83 @@ def test_run_is_compatibility_loop_over_incremental_session():
 
     assert engine.run(session) == ["set_level-token"]
     assert len(invoker.invocations) == 1
+
+
+def test_checkpoint_step_uses_injected_sink_after_source_action():
+    procedure = compile_procedure(
+        {
+            "id": "checkpointed",
+            "name": "Checkpointed",
+            "version": 1,
+            "purpose": "test",
+            "parameters": {},
+            "entry_step_id": "step:run",
+            "default_timeout": 60,
+            "metadata": {},
+            "steps": [
+                {"id": "run", "kind": "action", "action": "action:run", "timeout_polls": 2, "next_step_id": "step:save"},
+                {
+                    "id": "save",
+                    "kind": "checkpoint",
+                    "sink": "procedure.checkpoint.export",
+                    "payload": {"checkpoint_id": "cp-1", "value": {"result_ref": "last"}},
+                    "next_step_id": "step:done",
+                },
+                {"id": "done", "kind": "complete"},
+            ],
+        }
+    )
+    invoker = IncrementalInvoker()
+    requests = []
+    engine = ProcedureEngine(
+        invoker,
+        sink_registry=SinkRegistry(),
+        checkpoint_destination=CheckpointDestination("host-store"),
+        checkpoint_executor=lambda request: requests.append(request) or MutationOutcome("accepted"),
+    )
+    session = engine.new_session(procedure)
+    engine.preflight(session)
+    assert engine.advance(session).state is SessionState.WAITING_ACTION
+    assert engine.advance(session).state is SessionState.WAITING_ACTION
+    assert engine.advance(session).state is SessionState.READY
+    assert engine.advance(session).state is SessionState.SUCCEEDED
+    assert len(requests) == 1
+    assert requests[0].checkpoint.destination_id == "host-store"
+    assert requests[0].payload["checkpoint_id"] == "cp-1"
+
+
+def test_optional_checkpoint_failure_is_observable_without_failing_session():
+    procedure = compile_procedure(
+        {
+            "id": "optional-checkpoint",
+            "name": "Optional checkpoint",
+            "version": 1,
+            "purpose": "test",
+            "parameters": {},
+            "entry_step_id": "step:save",
+            "default_timeout": 60,
+            "metadata": {},
+            "steps": [
+                {
+                    "id": "save",
+                    "kind": "checkpoint",
+                    "sink": "procedure.checkpoint.export",
+                    "payload": {"checkpoint_id": "cp-optional"},
+                    "required": False,
+                },
+            ],
+        }
+    )
+    engine = ProcedureEngine(
+        IncrementalInvoker(),
+        sink_registry=SinkRegistry(),
+        checkpoint_destination=CheckpointDestination("host-store"),
+        checkpoint_executor=lambda request: MutationOutcome("rejected", "host unavailable"),
+    )
+    session = engine.new_session(procedure)
+    engine.preflight(session)
+
+    update = engine.advance(session)
+    assert update.state is SessionState.SUCCEEDED
+    assert update.error == "host unavailable"
+    assert session.warnings == ["host unavailable"]
