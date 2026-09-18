@@ -128,7 +128,11 @@ class SinkRequest:
         elif checkpoint is not None:
             raise SinkError("checkpoint destination is only valid for checkpoint export")
         _check_identifier(sink_id, "sink ID")
-        if not idempotency_key or not _IDENTIFIER.fullmatch(idempotency_key):
+        if (
+            not isinstance(idempotency_key, str)
+            or not idempotency_key
+            or not _IDENTIFIER.fullmatch(idempotency_key)
+        ):
             raise SinkError("idempotency key must be a trusted identifier")
         _validate_data(payload, "payload")
         object.__setattr__(self, "sink_id", sink_id)

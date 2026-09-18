@@ -210,6 +210,18 @@ def test_sink_spec_rejects_non_string_idempotency_keys(idempotency_key):
         SinkSpec("lab.calibration.observation", SinkEffect.OBSERVATION, True, idempotency_key)
 
 
+@pytest.mark.parametrize("idempotency_key", [1, object()])
+def test_sink_request_rejects_non_string_idempotency_keys(idempotency_key):
+    registry = SinkRegistry()
+
+    with pytest.raises(SinkError):
+        SinkRequest(
+            INITIAL_SINK_IDS[0], {}, idempotency_key, _registry=registry,
+        )
+    with pytest.raises(SinkError):
+        registry.request(INITIAL_SINK_IDS[0], {}, idempotency_key=idempotency_key)
+
+
 @pytest.mark.parametrize("payload", [
     {"path": "/tmp/output"}, {"url": "https://example.test"},
     {"sql": "SELECT * FROM observations"}, {"command": "python -c x"},
