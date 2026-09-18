@@ -296,59 +296,6 @@ class ProcedureEngine:
         index = ids.index(step_id) + 1
         return ids[index] if index < len(ids) else None
 
-    def _run_input(self, session: ProcedureSession, step: Step) -> None:
-        if self._input_provider is None or step.input_ref is None:
-            raise ProcedureRunError("input provider is required")
-        name = step.input_ref.id
-        if name not in session.procedure.parameters:
-            raise ProcedureRunError(f"input parameter is not declared: {name}")
-        value = self._input_provider.read(name, step.prompt or "", step.max_input_length or 1)
-        if len(str(value)) > (step.max_input_length or 1):
-            raise ProcedureRunError(f"input exceeds maximum length: {name}")
-        _validate_parameter_value(value, f"input.{name}")
-        session.inputs[name] = value
-
-    def _run_action(self, session: ProcedureSession, step: Step, deadline: float) -> None:
-        action = step.action_ref or step.poll_ref
-        parameters = _resolve_parameters(dict(step.parameters), session.inputs)
-        _authorize_action(self._invoker, action, parameters)
-        if self._clock() >= deadline:
-            raise ProcedureRunError(f"step timed out: {step.id}")
-        invocation = self._invoker.invoke(action, parameters)
-        result = PollResult(done=False)
-        for poll_number in range(step.timeout_polls):
-            if self._clock() >= deadline:
-                raise ProcedureRunError(f"step timed out: {step.id}")
-            result = self._invoker.poll(invocation)
-            if result.done:
-                break
-            if poll_number + 1 < step.timeout_polls and step.poll_interval_s:
-                remaining = deadline - self._clock()
-                if remaining <= 0:
-                    raise ProcedureRunError(f"step timed out: {step.id}")
-                self._sleep(min(step.poll_interval_s, remaining))
-        if not result.done:
-            raise ProcedureRunError(f"step timed out: {step.id}")
-        if not result.succeeded:
-            raise ProcedureRunError(result.error or f"step failed: {step.id}")
-        session.results.append(result.value)
-
-    def _branch(self, session: ProcedureSession, step: Step) -> str:
-        condition = step.condition_ref
-        evaluator = getattr(self._invoker, "evaluate_condition", None)
-        if not callable(evaluator):
-            evaluator = getattr(self._invoker, "check_condition", None)
-        if callable(evaluator):
-            outcome = bool(evaluator(condition, dict(session.inputs), tuple(session.results)))
-        elif condition is not None and condition.id in session.inputs:
-            outcome = bool(session.inputs[condition.id])
-        else:
-            raise ProcedureRunError("condition evaluator is required")
-        target = step.then_step_id if outcome else step.else_step_id
-        if target is None:
-            raise ProcedureRunError("branch target is missing")
-        return target.id
-
     def _fail(self, session: ProcedureSession, error: ProcedureRunError, *, kind: str) -> None:
         session.state = SessionState.FAILED
         session.error = str(error)
