@@ -101,6 +101,26 @@ def test_subclass_cannot_forge_registry_specs_at_the_public_boundary():
         )
 
 
+def test_direct_registry_spec_reassignment_cannot_change_request_resolution():
+    from procedure.sinks import SinkSpec
+
+    registry = SinkRegistry()
+    forged = {
+        INITIAL_SINK_IDS[0]: SinkSpec(
+            INITIAL_SINK_IDS[0], SinkEffect.CHECKPOINT_EXPORT, True, "checkpoint_id"
+        ),
+    }
+
+    with pytest.raises(AttributeError):
+        registry._specs = forged
+
+    request = registry.request(
+        INITIAL_SINK_IDS[0], {}, idempotency_key="obs-1",
+        session=SessionBinding("session-1", "calibration"),
+    )
+    assert request.sink_id == INITIAL_SINK_IDS[0]
+
+
 @pytest.mark.parametrize("field, value", [
     ("session", "session-1"),
     ("session", object()),
@@ -161,6 +181,25 @@ def test_initial_sink_metadata_must_be_a_sink_spec():
             INITIAL_SINK_IDS[1]: SinkRegistry().resolve(INITIAL_SINK_IDS[1]),
             INITIAL_SINK_IDS[2]: SinkRegistry().resolve(INITIAL_SINK_IDS[2]),
         })
+
+
+@pytest.mark.parametrize("field, value", [
+    ("effect", "observation"),
+    ("effect", object()),
+    ("persistent", 1),
+    ("persistent", "true"),
+    ("persistent", None),
+])
+def test_sink_spec_rejects_invalid_metadata_types(field, value):
+    from procedure.sinks import SinkSpec
+
+    with pytest.raises(SinkError):
+        SinkSpec(
+            "lab.calibration.observation",
+            SinkEffect.OBSERVATION if field != "effect" else value,
+            True if field != "persistent" else value,
+            "observation_id",
+        )
 
 
 @pytest.mark.parametrize("payload", [

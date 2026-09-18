@@ -59,6 +59,10 @@ class SinkSpec:
     idempotency_key: str
 
     def __post_init__(self) -> None:
+        if not isinstance(self.effect, SinkEffect):
+            raise SinkError("effect must be a SinkEffect")
+        if type(self.persistent) is not bool:
+            raise SinkError("persistent must be a bool")
         _check_identifier(self.id, "sink ID")
         if not self.idempotency_key or not _IDENTIFIER.fullmatch(self.idempotency_key):
             raise SinkError("idempotency_key must be a trusted identifier")
@@ -178,6 +182,8 @@ def _initial_registry() -> dict[str, SinkSpec]:
 class SinkRegistry:
     """Allow-list of sink IDs. Registration contains metadata, never executable code."""
 
+    __slots__ = ("_trusted_specs",)
+
     def __init__(self, specs: Mapping[str, SinkSpec] | None = None) -> None:
         initial = _initial_registry()
         values = dict(initial if specs is None else specs)
@@ -189,14 +195,24 @@ class SinkRegistry:
         for sink_id, expected in initial.items():
             if values[sink_id] != expected:
                 raise SinkError("initial trusted sink metadata cannot be replaced")
-        self._specs = MappingProxyType(values)
+        object.__setattr__(self, "_trusted_specs", MappingProxyType(values))
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "_trusted_specs":
+            raise AttributeError("trusted registry state is immutable")
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if name == "_trusted_specs":
+            raise AttributeError("trusted registry state is immutable")
+        object.__delattr__(self, name)
 
     def resolve(self, sink_id: str) -> SinkSpec:
         if type(self) is not SinkRegistry:
             raise SinkError("sink resolution requires the trusted registry implementation")
         try:
-            return self._specs[sink_id]
-        except (KeyError, TypeError) as exc:
+            return self._trusted_specs[sink_id]
+        except (AttributeError, KeyError, TypeError) as exc:
             raise SinkError("sink ID is not registered") from exc
 
     def request(
