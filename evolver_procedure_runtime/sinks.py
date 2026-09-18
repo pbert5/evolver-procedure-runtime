@@ -238,4 +238,4 @@ class SinkRegistry:
         return request
 
 
-SINK_CONTRACT_FROZEN = "procedure/SINK_CONTRACT_FROZEN.md"
+SINK_CONTRACT_FROZEN = "evolver_procedure_runtime/SINK_CONTRACT_FROZEN.md"

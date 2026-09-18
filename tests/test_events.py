@@ -1,9 +1,9 @@
 import json
 import pytest
 
-from procedure import EvidenceStrength, ObservedInvoker, ProcedureEventStream, RequiredObserverError, redact_payload
-from procedure import ActionInvocation, ActionRef, PollResult
-from procedure.events import MAX_HISTORY_EVENTS
+from evolver_procedure_runtime import EvidenceStrength, ObservedInvoker, ProcedureEventStream, RequiredObserverError, redact_payload
+from evolver_procedure_runtime import ActionInvocation, ActionRef, PollResult
+from evolver_procedure_runtime.events import MAX_HISTORY_EVENTS
 
 
 def stream(**overrides):

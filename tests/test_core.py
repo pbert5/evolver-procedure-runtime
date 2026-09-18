@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from procedure import (
+from evolver_procedure_runtime import (
     ActionInvocation,
     PollResult,
     ProcedureEngine,

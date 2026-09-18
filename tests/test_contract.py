@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from procedure import ActionRef, ActionResult, ProcedureCompileError, StepKind, compile_procedure
+from evolver_procedure_runtime import ActionRef, ActionResult, ProcedureCompileError, StepKind, compile_procedure
 
 
 def document(**overrides):

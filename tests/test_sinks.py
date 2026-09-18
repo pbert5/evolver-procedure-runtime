@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from procedure.sinks import (
+from evolver_procedure_runtime.sinks import (
     INITIAL_SINK_IDS,
     CheckpointDestination,
     MutationOutcome,
@@ -66,7 +66,7 @@ def test_public_sink_request_cannot_cross_session_and_checkpoint_bindings():
 
 
 def test_public_sink_request_uses_authoritative_registry_membership_for_subclasses():
-    from procedure.sinks import SinkSpec
+    from evolver_procedure_runtime.sinks import SinkSpec
 
     class ForgedRegistry(SinkRegistry):
         def resolve(self, sink_id):
@@ -81,7 +81,7 @@ def test_public_sink_request_uses_authoritative_registry_membership_for_subclass
 
 
 def test_subclass_cannot_forge_registry_specs_at_the_public_boundary():
-    from procedure.sinks import SinkSpec
+    from evolver_procedure_runtime.sinks import SinkSpec
 
     class ForgedRegistry(SinkRegistry):
         def __init__(self):
@@ -102,7 +102,7 @@ def test_subclass_cannot_forge_registry_specs_at_the_public_boundary():
 
 
 def test_direct_registry_spec_reassignment_cannot_change_request_resolution():
-    from procedure.sinks import SinkSpec
+    from evolver_procedure_runtime.sinks import SinkSpec
 
     registry = SinkRegistry()
     forged = {
@@ -149,7 +149,7 @@ def test_only_registered_sink_ids_are_accepted(sink_id):
 
 
 def test_explicitly_registered_additional_sink_is_allowed():
-    from procedure.sinks import SinkSpec
+    from evolver_procedure_runtime.sinks import SinkSpec
 
     spec = SinkSpec("lab.calibration.observation", SinkEffect.OBSERVATION, True, "observation_id")
     registry = SinkRegistry({**{sink_id: SinkRegistry().resolve(sink_id) for sink_id in INITIAL_SINK_IDS}, spec.id: spec})
@@ -163,7 +163,7 @@ def test_explicitly_registered_additional_sink_is_allowed():
 ])
 def test_initial_sink_metadata_cannot_be_replaced(field, value):
     from dataclasses import replace
-    from procedure.sinks import SinkSpec
+    from evolver_procedure_runtime.sinks import SinkSpec
 
     original = SinkRegistry().resolve(INITIAL_SINK_IDS[0])
     replacement = replace(original, **{field: value})
@@ -191,7 +191,7 @@ def test_initial_sink_metadata_must_be_a_sink_spec():
     ("persistent", None),
 ])
 def test_sink_spec_rejects_invalid_metadata_types(field, value):
-    from procedure.sinks import SinkSpec
+    from evolver_procedure_runtime.sinks import SinkSpec
 
     with pytest.raises(SinkError):
         SinkSpec(
@@ -204,7 +204,7 @@ def test_sink_spec_rejects_invalid_metadata_types(field, value):
 
 @pytest.mark.parametrize("idempotency_key", [1, object()])
 def test_sink_spec_rejects_non_string_idempotency_keys(idempotency_key):
-    from procedure.sinks import SinkSpec
+    from evolver_procedure_runtime.sinks import SinkSpec
 
     with pytest.raises(SinkError):
         SinkSpec("lab.calibration.observation", SinkEffect.OBSERVATION, True, idempotency_key)
